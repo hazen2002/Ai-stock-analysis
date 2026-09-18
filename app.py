@@ -143,6 +143,258 @@ def get_granular_industry_benchmarks(industry_str, sector_str):
     else:
         return f"{sector_str} - General", {"PE": 20.0, "PS": 2.5, "PEG": 1.3, "GM": 35.0, "NM": 10.0, "ROE": 15.0}
 
+
+def get_industry_growth_profile(industry_str, sector_str):
+    ind = (industry_str or "").lower()
+    sec = (sector_str or "").lower()
+
+    if "semicon" in ind or "chip" in ind:
+        return {"pess": 0.08, "base": 0.14, "opt": 0.22, "terminal": 0.035}
+    elif "software" in ind or "cloud" in ind or "saas" in ind or "infrastructure" in ind:
+        return {"pess": 0.09, "base": 0.15, "opt": 0.24, "terminal": 0.035}
+    elif "consumer electronics" in ind or "hardware" in ind or "device" in ind:
+        return {"pess": 0.06, "base": 0.10, "opt": 0.16, "terminal": 0.030}
+    elif "internet content" in ind or "interactive media" in ind or "social media" in ind or "advert" in ind:
+        return {"pess": 0.08, "base": 0.12, "opt": 0.18, "terminal": 0.030}
+    elif "internet retail" in ind or "e-commerce" in ind or "retail" in ind:
+        return {"pess": 0.07, "base": 0.11, "opt": 0.17, "terminal": 0.030}
+    elif "auto" in ind or "ev" in ind:
+        return {"pess": 0.07, "base": 0.12, "opt": 0.18, "terminal": 0.030}
+    elif "biotech" in ind or "pharmaceutical" in ind or "health" in ind:
+        return {"pess": 0.06, "base": 0.10, "opt": 0.16, "terminal": 0.030}
+    elif "bank" in ind or "financial" in ind or "insurance" in ind:
+        return {"pess": 0.04, "base": 0.07, "opt": 0.10, "terminal": 0.025}
+    elif "energy" in ind or "oil" in ind or "utility" in ind:
+        return {"pess": 0.03, "base": 0.05, "opt": 0.09, "terminal": 0.025}
+    else:
+        return {"pess": 0.06, "base": 0.10, "opt": 0.16, "terminal": 0.030}
+
+
+def estimate_stock_growth_anchor(info, industry_profile):
+    """Primary growth anchor should come from the selected stock, not a generic industry average."""
+    candidates = []
+
+    for key in ["earningsGrowth", "revenueGrowth", "grossMargins", "operatingMargins"]:
+        value = info.get(key)
+        if isinstance(value, (int, float)) and pd.notna(value):
+            if key in ["grossMargins", "operatingMargins"]:
+                candidates.append(value / 100.0)
+            else:
+                candidates.append(float(value))
+
+    if "capacityToGrow" in info:
+        maybe = info.get("capacityToGrow")
+        if isinstance(maybe, (int, float)) and pd.notna(maybe):
+            candidates.append(float(maybe))
+
+    if not candidates:
+        return float(industry_profile["base"])
+
+    stock_anchor = float(np.median(candidates))
+    lower = float(industry_profile["pess"])
+    upper = float(industry_profile["opt"])
+
+    if stock_anchor < 0:
+        stock_anchor = lower
+
+    return max(lower, min(stock_anchor, upper))
+
+
+def estimate_fcf_growth_anchor(fcf_history, industry_profile, fcf_dates=None):
+    """Use the latest three annual FCF growth rates and their trend as the forward anchor."""
+    if fcf_dates and len(fcf_dates) == len(fcf_history):
+        dated_fcf = sorted(zip(fcf_dates, fcf_history), key=lambda item: item[0])
+        chronological_fcf = [float(value) for _, value in dated_fcf if pd.notna(value)]
+    else:
+        chronological_fcf = [float(value) for value in reversed(fcf_history) if pd.notna(value)]
+
+    if len(chronological_fcf) < 4:
+        return None, [], 0.0
+
+    recent_fcf = chronological_fcf[-4:]
+    if any(value <= 0 for value in recent_fcf):
+        return None, [], 0.0
+
+    raw_growth_rates = [
+        (current / previous) - 1.0
+        for previous, current in zip(recent_fcf, recent_fcf[1:])
+        if previous > 0
+    ][-3:]
+    growth_rates = [max(-0.20, min(rate, 0.60)) for rate in raw_growth_rates]
+
+    if not growth_rates:
+        return None, [], 0.0
+
+    if len(growth_rates) >= 2:
+        years = np.arange(len(growth_rates), dtype=float)
+        slope = float(np.polyfit(years, growth_rates, 1)[0])
+    else:
+        slope = 0.0
+
+    latest_growth = growth_rates[-1]
+    projected_growth = latest_growth + (slope * 0.5)
+    projected_growth = max(-0.50, min(projected_growth, 1.00))
+    return projected_growth, growth_rates, slope
+
+
+def estimate_net_income_growth_anchor(financials, info):
+    """Estimate a selected company's earnings growth without applying an industry cap."""
+    net_income = None
+    if not financials.empty:
+        for row_name in ["Net Income", "Net Income Common Stockholders"]:
+            if row_name in financials.index:
+                values = pd.to_numeric(financials.loc[row_name], errors="coerce").dropna().tolist()
+                if len(values) >= 2:
+                    net_income = [float(value) for value in reversed(values)]
+                    break
+
+    growth_rates = []
+    if net_income and len(net_income) >= 2:
+        for previous, current in zip(net_income[-4:], net_income[-3:]):
+            if previous > 0:
+                growth_rates.append((current / previous) - 1.0)
+
+    reported_growth = info.get("earningsGrowth")
+    if growth_rates:
+        latest_growth = growth_rates[-1]
+        slope = float(np.polyfit(np.arange(len(growth_rates), dtype=float), growth_rates, 1)[0]) if len(growth_rates) >= 2 else 0.0
+        return max(-0.50, min(latest_growth + (slope * 0.5), 1.00))
+    if isinstance(reported_growth, (int, float)) and pd.notna(reported_growth):
+        return max(-0.50, min(float(reported_growth), 1.00))
+    return None
+
+
+def get_growth_signal_weights(industry_str, sector_str):
+    """Weight growth signals according to the economics of each business type."""
+    text = f"{industry_str or ''} {sector_str or ''}".lower()
+    if any(term in text for term in ["software", "cloud", "saas", "internet"]):
+        return {"fcf": 0.25, "net_income": 0.25, "revenue": 0.50}
+    if any(term in text for term in ["semicon", "chip", "hardware"]):
+        return {"fcf": 0.40, "net_income": 0.25, "revenue": 0.35}
+    if any(term in text for term in ["bank", "financial", "insurance"]):
+        return {"fcf": 0.20, "net_income": 0.50, "revenue": 0.30}
+    if any(term in text for term in ["energy", "oil", "utility", "auto"]):
+        return {"fcf": 0.50, "net_income": 0.30, "revenue": 0.20}
+    return {"fcf": 0.40, "net_income": 0.30, "revenue": 0.30}
+
+
+def classify_corporate_lifecycle(revenue_growth, fcf_margin, negative_trend=False):
+    """Classify the company and return its signal weights and minimum forecast growth."""
+    revenue_growth = float(revenue_growth) if pd.notna(revenue_growth) else 0.0
+    fcf_margin = float(fcf_margin) if pd.notna(fcf_margin) else 0.0
+
+    if negative_trend or revenue_growth < 0.05:
+        return "Dog", {"fcf": 0.40, "net_income": 0.40, "revenue": 0.20}, -0.12, 0.015
+    if revenue_growth > 0.15 and fcf_margin >= 0.10:
+        return "Star", {"fcf": 0.20, "net_income": 0.30, "revenue": 0.50}, -0.05, 0.025
+    if revenue_growth <= 0.15 and fcf_margin >= 0.10:
+        return "Cash Cow", {"fcf": 0.60, "net_income": 0.30, "revenue": 0.10}, -0.02, 0.025
+    return "Question Mark", {"fcf": 0.10, "net_income": 0.10, "revenue": 0.80}, 0.00, 0.015
+def adjust_growth_weights_for_scale(weights, market_cap, net_income_growth, fcf_growth, capex_intensity):
+    """Adjust lifecycle weights for company scale and temporary investment-heavy FCF."""
+    market_cap = float(market_cap or 0.0)
+    if market_cap >= 200_000_000_000:
+        size_label = "Mega Cap (>= $200B)"
+        scale_shift = 0.10
+    elif market_cap >= 10_000_000_000:
+        size_label = "Large Cap ($10B-$200B)"
+        scale_shift = 0.06
+    elif market_cap >= 2_000_000_000:
+        size_label = "Mid Cap ($2B-$10B)"
+        scale_shift = 0.02
+    else:
+        size_label = "Small Cap (< $2B)"
+        scale_shift = 0.0
+
+    adjusted = dict(weights)
+    earnings_outpace_fcf = (
+        net_income_growth is not None
+        and fcf_growth is not None
+        and float(net_income_growth) > float(fcf_growth) + 0.05
+    )
+    high_capex = float(capex_intensity or 0.0) >= 0.10
+
+    if scale_shift > 0 and (earnings_outpace_fcf or high_capex):
+        shift = scale_shift + (0.05 if earnings_outpace_fcf and high_capex else 0.0)
+        shift = min(0.20, shift)
+        adjusted["fcf"] = max(0.05, adjusted["fcf"] - shift)
+        adjusted["net_income"] += shift * 0.65
+        adjusted["revenue"] += shift * 0.35
+
+    total_weight = sum(adjusted.values())
+    normalized = {key: value / total_weight for key, value in adjusted.items()}
+    return normalized, size_label, earnings_outpace_fcf, high_capex
+
+
+def get_revenue_growth_anchor(info):
+    """Return the selected company's reported revenue growth within a broad sanity range."""
+    revenue_growth = info.get("revenueGrowth")
+    if isinstance(revenue_growth, (int, float)) and pd.notna(revenue_growth):
+        return max(-0.50, min(float(revenue_growth), 1.00))
+    return None
+
+
+def calculate_fcfe_dcf(
+    current_stock_price,
+    base_revenue,
+    revenue_growth_rate,
+    target_net_margin,
+    cash_flow_conversion_rate,
+    forecast_period,
+    discount_rate,
+    exit_multiple,
+    total_shares_outstanding,
+):
+    """Calculate an FCFE valuation from revenue, margin, conversion, and an exit multiple."""
+    revenue = max(float(base_revenue), 0.0)
+    growth_rate = max(-0.50, min(float(revenue_growth_rate), 1.00))
+    net_margin = max(0.0, min(float(target_net_margin), 1.00))
+    conversion_rate = max(0.0, min(float(cash_flow_conversion_rate), 2.00))
+    years = max(1, int(forecast_period))
+    discount = float(discount_rate)
+    if discount > 1.0:
+        discount /= 100.0
+    discount = max(0.01, min(discount, 0.50))
+    multiple = max(0.0, float(exit_multiple))
+    shares = max(float(total_shares_outstanding), 0.0)
+
+    yearly_projections = []
+    present_value_total = 0.0
+    for year in range(1, years + 1):
+        revenue *= 1.0 + growth_rate
+        net_income = revenue * net_margin
+        fcfe = net_income * conversion_rate
+        present_value = fcfe / ((1.0 + discount) ** year)
+        present_value_total += present_value
+        yearly_projections.append({
+            "Year": year,
+            "Revenue": revenue,
+            "Net Income": net_income,
+            "FCFE": fcfe,
+            "Present Value": present_value,
+        })
+
+    terminal_value = yearly_projections[-1]["FCFE"] * multiple
+    present_value_terminal = terminal_value / ((1.0 + discount) ** years)
+    total_present_value = present_value_total + present_value_terminal
+    value_per_share = total_present_value / shares if shares > 0 else 0.0
+    valuation_difference = (
+        ((float(current_stock_price) - value_per_share) / value_per_share) * 100
+        if value_per_share > 0 else 0.0
+    )
+    status = "Overvalued" if valuation_difference >= 0 else "Undervalued"
+
+    return {
+        "dcfValuePerShare": value_per_share,
+        "valuationStatus": f"{status} by {abs(valuation_difference):.2f}%",
+        "yearlyProjections": yearly_projections,
+        "terminalValue": terminal_value,
+        "presentValueTerminal": present_value_terminal,
+        "totalPresentValue": total_present_value,
+        "discountRate": discount,
+        "exitMultiple": multiple,
+    }
+
 def classify_trend_status(df):
     if df.empty or len(df) < 55:
         return "資料不足", "無法計算趨勢"
@@ -493,6 +745,7 @@ if symbol:
 
             net_debt = 0.0
             total_debt = 0.0
+            cash_val = 0.0
 
             if not bs.empty:
                 try:
@@ -529,88 +782,326 @@ if symbol:
                 discount_rate = cost_of_equity
                 wacc_label = f"Cost of Equity {discount_rate*100:.2f}% (Rf: {rf_rate*100:.2f}%)"
 
+            def normalize_absolute_dollars(value, reference_market_cap):
+                """Convert provider values reported in millions to absolute dollars for mega-caps."""
+                if value is None or pd.isna(value):
+                    return 0.0
+                amount = float(value)
+                if reference_market_cap >= 1_000_000_000 and 0 < abs(amount) < 1_000_000:
+                    return amount * 1_000_000.0
+                return amount
+
+            mkt_cap_val = float(info.get("marketCap", 0) or 0.0)
+            fcf_history = [normalize_absolute_dollars(value, mkt_cap_val) for value in fcf_history]
+            ttm_fcf = normalize_absolute_dollars(ttm_fcf, mkt_cap_val)
+            total_debt = normalize_absolute_dollars(total_debt, mkt_cap_val)
+            cash_val = normalize_absolute_dollars(cash_val, mkt_cap_val)
+            net_debt = total_debt - cash_val
+
             valid_fcfs = [f for f in fcf_history if f > 0]
-            if ttm_fcf and ttm_fcf > 0:
-                base_fcf = max(ttm_fcf, max(valid_fcfs) if valid_fcfs else 0)
-            elif valid_fcfs:
-                base_fcf = max(valid_fcfs)
+            dated_fcf = sorted(zip(fcf_dates, fcf_history), key=lambda item: item[0]) if fcf_dates else []
+            chronological_fcf = [float(value) for _, value in dated_fcf if pd.notna(value)]
+            latest_annual_fcf = chronological_fcf[-1] if chronological_fcf and chronological_fcf[-1] > 0 else None
+            historical_fcf_average = float(np.mean([value for value in chronological_fcf[-3:] if value > 0])) if chronological_fcf else 0.0
+            latest_fcf = latest_annual_fcf or (ttm_fcf if ttm_fcf > 0 else (valid_fcfs[-1] if valid_fcfs else 0.0))
+
+            latest_net_income = 0.0
+            if not fin.empty:
+                for income_name in ["Net Income", "Net Income Common Stockholders"]:
+                    if income_name in fin.index:
+                        income_values = pd.to_numeric(fin.loc[income_name], errors="coerce").dropna().tolist()
+                        if income_values:
+                            latest_net_income = normalize_absolute_dollars(float(income_values[0]), mkt_cap_val)
+                            break
+
+            smoothed_fcf = historical_fcf_average
+            if latest_net_income > 0:
+                smoothed_fcf = max(smoothed_fcf, latest_net_income * 0.80)
+            if latest_fcf > 0 and smoothed_fcf > 0 and latest_fcf < smoothed_fcf * 0.50:
+                base_fcf = smoothed_fcf
             else:
-                base_fcf = 0
+                base_fcf = latest_fcf or smoothed_fcf
 
             if base_fcf > 0 and shares_out > 0:
-                growth_est = info.get("earningsGrowth") or info.get("revenueGrowth") or 0.15
-                if pd.isna(growth_est) or growth_est is None:
-                    growth_est = 0.12
+                industry_growth = get_industry_growth_profile(raw_industry, raw_sector)
+                fcf_growth_anchor, recent_fcf_growth, fcf_growth_slope = estimate_fcf_growth_anchor(
+                    fcf_history, industry_growth, fcf_dates
+                )
+                net_income_growth_anchor = estimate_net_income_growth_anchor(fin, info)
+                revenue_growth_anchor = get_revenue_growth_anchor(info)
+                annual_revenue = normalize_absolute_dollars(
+                    info.get("totalRevenue") or info.get("revenue") or 0.0, mkt_cap_val
+                )
+                if not annual_revenue and not fin.empty:
+                    for revenue_name in ["Total Revenue", "Operating Revenue"]:
+                        if revenue_name in fin.index:
+                            annual_revenue = normalize_absolute_dollars(
+                                float(pd.to_numeric(fin.loc[revenue_name], errors="coerce").dropna().iloc[0]),
+                                mkt_cap_val,
+                            )
+                            break
+                annual_revenue = float(annual_revenue or 0.0)
+                fcf_margin = base_fcf / annual_revenue if annual_revenue > 0 else 0.0
+                latest_capex = 0.0
+                if not cf_df.empty and "Capital Expenditure" in cf_df.index:
+                    capex_values = pd.to_numeric(cf_df.loc["Capital Expenditure"], errors="coerce").dropna()
+                    if not capex_values.empty:
+                        latest_capex = abs(float(capex_values.iloc[0]))
+                capex_intensity = latest_capex / annual_revenue if annual_revenue > 0 else 0.0
+                negative_fcf_trend = bool(fcf_growth_slope < -0.10 or (recent_fcf_growth and recent_fcf_growth[-1] < -0.20))
+                investment_heavy_growth = bool(
+                    mkt_cap_val >= 10_000_000_000
+                    and capex_intensity >= 0.10
+                    and (net_income_growth_anchor or 0.0) > 0.0
+                    and (revenue_growth_anchor or 0.0) > 0.05
+                )
+                lifecycle, weights, growth_floor, terminal_g = classify_corporate_lifecycle(
+                    revenue_growth_anchor or 0.0,
+                    fcf_margin,
+                    negative_fcf_trend and not investment_heavy_growth,
+                )
 
-                growth_est = max(0.05, min(growth_est, 0.50))
+                lifecycle_growth_ceiling = {
+                    "Star": 0.30,
+                    "Cash Cow": 0.18,
+                    "Question Mark": 0.30,
+                    "Dog": 0.12,
+                }.get(lifecycle, 0.25)
 
-                def run_dcf_5yr_details(b_fcf, init_g, disc_r, term_g=0.025):
-                    fcfs = []
-                    pvs = []
-                    fcf = b_fcf
-                    for yr in range(1, 6):
-                        fcf *= (1 + init_g)
-                        pv = fcf / ((1 + disc_r) ** yr)
+                signals = {"fcf": fcf_growth_anchor, "net_income": net_income_growth_anchor, "revenue": revenue_growth_anchor}
+                if investment_heavy_growth and signals["fcf"] is not None:
+                    signals["fcf"] = max(float(signals["fcf"]), 0.0)
+                weights, company_size, earnings_outpace_fcf, high_capex = adjust_growth_weights_for_scale(
+                    weights,
+                    mkt_cap_val,
+                    net_income_growth_anchor,
+                    fcf_growth_anchor,
+                    capex_intensity,
+                )
+                clamped_signals = {
+                    key: max(-0.20, min(float(value), 0.35))
+                    for key, value in signals.items()
+                    if value is not None and pd.notna(value)
+                }
+                available_weight = sum(weights[key] for key in clamped_signals)
+                growth_est = (
+                    sum(clamped_signals[key] * weights[key] for key in clamped_signals) / available_weight
+                    if available_weight > 0 else 0.0
+                )
+                growth_est = max(growth_floor, min(growth_est, lifecycle_growth_ceiling))
+                company_ceiling = lifecycle_growth_ceiling
+
+                def build_stage_growth_schedule(base_growth, style):
+                    """Build a five-year high-growth fade while preserving the life-cycle floor."""
+                    base_growth = max(growth_floor, min(float(base_growth), company_ceiling))
+                    slope_effect = max(-0.08, min(float(fcf_growth_slope), 0.08))
+                    if style == "pess":
+                        multipliers = [0.85, 0.75, 0.65, 0.55, 0.45]
+                    elif style == "opt":
+                        multipliers = [1.15, 1.05, 0.95, 0.85, 0.75]
+                    else:
+                        multipliers = [1.00, 0.95, 0.85, 0.75, 0.65]
+                    growth_schedule = [
+                        max(growth_floor, min(base_growth * multiplier + slope_effect * (index / 4), company_ceiling))
+                        for index, multiplier in enumerate(multipliers)
+                    ]
+                    return growth_schedule, terminal_g
+
+                def run_multistage_dcf(b_fcf, growth_schedule, disc_r, term_g):
+                    """Calculate DCF using absolute-dollar FCF, debt, cash, and shares throughout."""
+                    disc_r = float(disc_r)
+                    if disc_r > 1.0:
+                        disc_r /= 100.0
+                    disc_r = max(0.01, min(disc_r, 0.50))
+                    safe_term_g = min(float(term_g), disc_r - 0.005)
+                    safe_term_g = max(0.0, safe_term_g)
+                    fcfs, pvs = [], []
+                    fcf = float(b_fcf)
+                    for yr, growth in enumerate(growth_schedule, start=1):
+                        fcf *= 1.0 + float(growth)
                         fcfs.append(fcf)
-                        pvs.append(pv)
-
-                    terminal_val = (fcfs[-1] * (1 + term_g)) / (disc_r - term_g) if disc_r > term_g else 0
-                    pv_terminal = terminal_val / ((1 + disc_r) ** 5)
-
+                        pvs.append(fcf / ((1.0 + disc_r) ** yr))
+                    terminal_val = (fcfs[-1] * (1.0 + safe_term_g)) / (disc_r - safe_term_g)
+                    terminal_val *= market_multiple_factor
+                    pv_terminal = terminal_val / ((1.0 + disc_r) ** len(growth_schedule))
                     enterprise_value = sum(pvs) + pv_terminal
-                    equity_value = enterprise_value - net_debt
-                    intrinsic_value_per_share = equity_value / shares_out
-                    return max(intrinsic_value_per_share, 0.0), fcfs, pvs, terminal_val, pv_terminal, enterprise_value, equity_value
+                    equity_value = max(enterprise_value + cash_val - total_debt, 0.0)
+                    intrinsic_value_per_share = equity_value / float(shares_out)
+                    return intrinsic_value_per_share, fcfs, pvs, terminal_val, pv_terminal, enterprise_value, equity_value
 
-                base_val, base_fcfs, base_pvs, base_tv, base_pv_tv, base_ev, base_eq = run_dcf_5yr_details(base_fcf, growth_est, discount_rate, term_g=0.025)
-                
-                pess_growth = max(0.03, growth_est * 0.75)
+                pe_implied_value = (
+                    latest_net_income * float(ind_benchmarks["PE"]) / float(shares_out)
+                    if latest_net_income > 0 and shares_out > 0 else None
+                )
+                ps_implied_value = (
+                    annual_revenue * float(ind_benchmarks["PS"]) / float(shares_out)
+                    if annual_revenue > 0 and shares_out > 0 else None
+                )
+
+                observed_multiple_premiums = []
+                observed_pe = info.get("forwardPE") or info.get("trailingPE")
+                observed_ps = info.get("priceToSalesTrailing12Months")
+                if isinstance(observed_pe, (int, float)) and pd.notna(observed_pe) and observed_pe > 0:
+                    observed_multiple_premiums.append(float(observed_pe) / float(ind_benchmarks["PE"]))
+                if isinstance(observed_ps, (int, float)) and pd.notna(observed_ps) and observed_ps > 0:
+                    observed_multiple_premiums.append(float(observed_ps) / float(ind_benchmarks["PS"]))
+                market_multiple_factor = (
+                    max(0.75, min(float(np.mean(observed_multiple_premiums)), 1.50))
+                    if observed_multiple_premiums else 1.0
+                )
+                if pe_implied_value is not None:
+                    pe_implied_value *= market_multiple_factor
+                if ps_implied_value is not None:
+                    ps_implied_value *= market_multiple_factor
+
+                if lifecycle == "Star":
+                    valuation_weights = {"dcf": 0.55, "pe": 0.20, "ps": 0.25}
+                elif lifecycle == "Cash Cow":
+                    valuation_weights = {"dcf": 0.55, "pe": 0.30, "ps": 0.15}
+                elif lifecycle == "Question Mark":
+                    valuation_weights = {"dcf": 0.50, "pe": 0.15, "ps": 0.35}
+                else:
+                    valuation_weights = {"dcf": 0.50, "pe": 0.35, "ps": 0.15}
+
+                def blend_valuation(dcf_value):
+                    """Blend intrinsic DCF value with earnings and sales cross-checks."""
+                    values = {"dcf": dcf_value, "pe": pe_implied_value, "ps": ps_implied_value}
+                    available = {key: value for key, value in values.items() if value is not None and value >= 0}
+                    weight_total = sum(valuation_weights[key] for key in available)
+                    if weight_total <= 0:
+                        return max(float(dcf_value), 0.0)
+                    return sum(available[key] * valuation_weights[key] for key in available) / weight_total
+
+                target_net_margin = (
+                    latest_net_income / annual_revenue
+                    if latest_net_income > 0 and annual_revenue > 0
+                    else float(info.get("profitMargins") or 0.0)
+                )
+                cash_flow_conversion_rate = (
+                    base_fcf / latest_net_income
+                    if latest_net_income > 0 and base_fcf > 0
+                    else 0.80
+                )
+                cash_flow_conversion_rate = max(0.50, min(cash_flow_conversion_rate, 1.50))
+                exit_multiple = max(8.0, min(float(ind_benchmarks["PE"]) * market_multiple_factor, 45.0))
+                forecast_period = 10
+
+                base_growth_rate = growth_est
+                pess_growth_rate = max(growth_floor, growth_est - 0.05)
+                opt_growth_rate = min(company_ceiling, growth_est + 0.05)
+                base_fcfe_result = calculate_fcfe_dcf(
+                    curr_price, annual_revenue, base_growth_rate, target_net_margin,
+                    cash_flow_conversion_rate, forecast_period, discount_rate,
+                    exit_multiple, shares_out,
+                )
+                pess_fcfe_result = calculate_fcfe_dcf(
+                    curr_price, annual_revenue, pess_growth_rate, target_net_margin,
+                    cash_flow_conversion_rate, forecast_period, discount_rate + 0.01,
+                    exit_multiple * 0.90, shares_out,
+                )
+                opt_fcfe_result = calculate_fcfe_dcf(
+                    curr_price, annual_revenue, opt_growth_rate, target_net_margin,
+                    cash_flow_conversion_rate, forecast_period, max(discount_rate - 0.008, 0.05),
+                    exit_multiple * 1.10, shares_out,
+                )
+
+                base_schedule = [base_growth_rate] * 5
+                pess_schedule = [pess_growth_rate] * 5
+                opt_schedule = [opt_growth_rate] * 5
+                base_term_g = pess_term_g = opt_term_g = 0.0
+                base_dcf_val = base_fcfe_result["dcfValuePerShare"]
+                pess_dcf_val = pess_fcfe_result["dcfValuePerShare"]
+                opt_dcf_val = opt_fcfe_result["dcfValuePerShare"]
+                base_val = blend_valuation(base_dcf_val)
+                pess_val = blend_valuation(pess_dcf_val)
+                opt_val = blend_valuation(opt_dcf_val)
+
+                base_fcfs = [row["FCFE"] for row in base_fcfe_result["yearlyProjections"][:5]]
+                base_pvs = [row["Present Value"] for row in base_fcfe_result["yearlyProjections"][:5]]
+                base_tv = base_fcfe_result["terminalValue"]
+                base_pv_tv = base_fcfe_result["presentValueTerminal"]
+                base_ev = base_fcfe_result["totalPresentValue"]
+                base_eq = base_ev
+
                 pess_discount = discount_rate + 0.01
-                pess_val, pess_fcfs, pess_pvs, pess_tv, pess_pv_tv, pess_ev, pess_eq = run_dcf_5yr_details(base_fcf, pess_growth, pess_discount, term_g=0.020)
-
-                opt_growth = min(growth_est * 1.25, 0.50)
                 opt_discount = max(discount_rate - 0.008, 0.05)
-                opt_val, opt_fcfs, opt_pvs, opt_tv, opt_pv_tv, opt_ev, opt_eq = run_dcf_5yr_details(base_fcf, opt_growth, opt_discount, term_g=0.030)
+                pess_fcfs = [row["FCFE"] for row in pess_fcfe_result["yearlyProjections"][:5]]
+                pess_pvs = [row["Present Value"] for row in pess_fcfe_result["yearlyProjections"][:5]]
+                pess_tv = pess_fcfe_result["terminalValue"]
+                pess_pv_tv = pess_fcfe_result["presentValueTerminal"]
+                pess_ev = pess_fcfe_result["totalPresentValue"]
+                pess_eq = pess_ev
+                opt_fcfs = [row["FCFE"] for row in opt_fcfe_result["yearlyProjections"][:5]]
+                opt_pvs = [row["Present Value"] for row in opt_fcfe_result["yearlyProjections"][:5]]
+                opt_tv = opt_fcfe_result["terminalValue"]
+                opt_pv_tv = opt_fcfe_result["presentValueTerminal"]
+                opt_ev = opt_fcfe_result["totalPresentValue"]
+                opt_eq = opt_ev
 
                 dcf_col1, dcf_col2, dcf_col3, dcf_col4 = st.columns(4)
-                dcf_col1.metric("🔴 保守情境估值", f"${pess_val:.2f}", help=f"成長率: {pess_growth*100:.1f}%, 折現率: {pess_discount*100:.1f}%, 終值成長: 2.0%")
-                dcf_col2.metric("🟡 基準情境估值", f"${base_val:.2f}", help=f"成長率: {growth_est*100:.1f}%, 折現率: {discount_rate*100:.1f}%, 終值成長: 2.5%")
-                dcf_col3.metric("🟢 樂觀情境估值", f"${opt_val:.2f}", help=f"成長率: {opt_growth*100:.1f}%, 折現率: {opt_discount*100:.1f}%, 終值成長: 3.0%")
+                dcf_col1.metric("🔴 保守情境估值", f"${pess_val:.2f}", help=f"成長階段: {', '.join(f'{g*100:.1f}%' for g in pess_schedule)}% | 折現率: {pess_discount*100:.1f}% | 終值成長: {pess_term_g*100:.1f}%")
+                dcf_col2.metric("🟡 基準情境估值", f"${base_val:.2f}", help=f"成長階段: {', '.join(f'{g*100:.1f}%' for g in base_schedule)}% | 折現率: {discount_rate*100:.1f}% | 終值成長: {base_term_g*100:.1f}%")
+                dcf_col3.metric("🟢 樂觀情境估值", f"${opt_val:.2f}", help=f"成長階段: {', '.join(f'{g*100:.1f}%' for g in opt_schedule)}% | 折現率: {opt_discount*100:.1f}% | 終值成長: {opt_term_g*100:.1f}%")
 
                 margin_of_safety = ((base_val - curr_price) / base_val) * 100 if base_val > 0 else 0
                 dcf_col4.metric("當前股價 / 安全邊際", f"${curr_price:.2f}", delta=f"安全邊際: {margin_of_safety:.1f}%")
 
+                st.write({
+                    "Classification Stage": lifecycle,
+                    "Company Size Benchmark": company_size,
+                    "AI/Investment Capex Intensity (%)": round(capex_intensity * 100, 2),
+                    "Investment-Heavy Growth Treatment": investment_heavy_growth,
+                    "Net Income Growth > FCF Growth": earnings_outpace_fcf,
+                    "Growth Weights (FCF/NI/Revenue)": f"{weights['fcf']:.0%} / {weights['net_income']:.0%} / {weights['revenue']:.0%}",
+                    "Valuation Weights (DCF/PE/PS)": f"{valuation_weights['dcf']:.0%} / {valuation_weights['pe']:.0%} / {valuation_weights['ps']:.0%}",
+                    "Market Multiple Premium Factor": round(market_multiple_factor, 3),
+                    "P/E Implied Value ($/share)": round(pe_implied_value, 2) if pe_implied_value is not None else None,
+                    "P/S Implied Value ($/share)": round(ps_implied_value, 2) if ps_implied_value is not None else None,
+                    "Blended Growth Anchor (%)": round(growth_est * 100, 2),
+                    "Starting FCF Base ($)": round(base_fcf, 2),
+                    "Discount Rate Used (r)": round(discount_rate, 6),
+                    "Enterprise Value ($)": round(base_ev, 2),
+                    "Total Debt ($)": round(total_debt, 2),
+                    "Shares Outstanding": round(float(shares_out), 2),
+                })
+
                 scenario_details = [
-                    ("🔴 保守情境計算明細", pess_growth, pess_discount, 0.020, pess_val, pess_fcfs, pess_pvs, pess_tv, pess_pv_tv, pess_ev, pess_eq),
-                    ("🟡 基準情境計算明細", growth_est, discount_rate, 0.025, base_val, base_fcfs, base_pvs, base_tv, base_pv_tv, base_ev, base_eq),
-                    ("🟢 樂觀情境計算明細", opt_growth, opt_discount, 0.030, opt_val, opt_fcfs, opt_pvs, opt_tv, opt_pv_tv, opt_ev, opt_eq),
+                    ("🔴 保守情境計算明細", pess_schedule, pess_discount, pess_term_g, pess_val, pess_fcfs, pess_pvs, pess_tv, pess_pv_tv, pess_ev, pess_eq),
+                    ("🟡 基準情境計算明細", base_schedule, discount_rate, base_term_g, base_val, base_fcfs, base_pvs, base_tv, base_pv_tv, base_ev, base_eq),
+                    ("🟢 樂觀情境計算明細", opt_schedule, opt_discount, opt_term_g, opt_val, opt_fcfs, opt_pvs, opt_tv, opt_pv_tv, opt_ev, opt_eq),
                 ]
 
-                for scenario_title, scenario_growth, scenario_discount, scenario_terminal_growth, scenario_value, scenario_fcfs, scenario_pvs, scenario_tv, scenario_pv_tv, scenario_ev, scenario_eq in scenario_details:
+                for scenario_title, scenario_growth_schedule, scenario_discount, scenario_terminal_growth, scenario_value, scenario_fcfs, scenario_pvs, scenario_tv, scenario_pv_tv, scenario_ev, scenario_eq in scenario_details:
                     with st.expander(f"🧮 {scenario_title}"):
+                        stage_text = ", ".join(f"Y{idx}={g * 100:.1f}%" for idx, g in enumerate(scenario_growth_schedule, start=1))
                         st.caption(
-                            f"假設：起始 FCFF ${base_fcf / 1e9:.2f}B | 成長率 {scenario_growth * 100:.1f}% | "
-                            f"折現率 {scenario_discount * 100:.2f}% | 終值成長率 {scenario_terminal_growth * 100:.1f}% | "
+                            f"假設：基準營收 ${annual_revenue / 1e9:.2f}B | 10年 FCFE 成長率: {stage_text} | "
+                            f"折現率 {scenario_discount * 100:.2f}% | FCFE 轉換率 {cash_flow_conversion_rate * 100:.1f}% | "
+                            f"退出倍數 {exit_multiple:.1f}x | "
                             f"淨債務 ${net_debt / 1e9:.2f}B | 流通股數 {shares_out / 1e9:.2f}B"
                         )
                         assumptions = pd.DataFrame({
                             "模型假設": [
                                 "預測年期",
-                                "起始 FCFF",
-                                "FCFF 成長率",
+                                "基準營收",
+                                "FCFE 成長假設",
+                                "目標淨利率",
+                                "FCFE 轉換率",
+                                "退出倍數",
                                 "折現率",
-                                "終值成長率",
                                 "無風險利率 / Beta / ERP",
                                 "股權成本",
                                 "總債務 / 淨債務",
                                 "流通股數",
                             ],
                             "採用數值": [
-                                "5 年",
-                                f"${base_fcf / 1e9:.2f}B",
-                                f"{scenario_growth * 100:.1f}%",
+                                "10 年",
+                                f"${annual_revenue / 1e9:.2f}B",
+                                stage_text,
+                                f"{target_net_margin * 100:.2f}%",
+                                f"{cash_flow_conversion_rate * 100:.2f}%",
+                                f"{exit_multiple:.2f}x",
                                 f"{scenario_discount * 100:.2f}%",
-                                f"{scenario_terminal_growth * 100:.1f}%",
                                 f"{rf_rate * 100:.2f}% / {beta:.2f} / {erp * 100:.2f}%",
                                 f"{cost_of_equity * 100:.2f}%",
                                 f"${total_debt / 1e9:.2f}B / ${net_debt / 1e9:.2f}B",
@@ -619,29 +1110,31 @@ if symbol:
                         })
                         st.dataframe(assumptions, use_container_width=True, hide_index=True)
                         st.code(
-                            "FCFF_t = FCFF_(t-1) * (1 + growth)\n"
-                            "PV(FCFF_t) = FCFF_t / (1 + discount_rate)^t\n"
-                            "Terminal Value = FCFF_5 * (1 + terminal_growth) / (discount_rate - terminal_growth)\n"
-                            "Enterprise Value = sum(PV of FCFF_1..5) + PV(Terminal Value)\n"
-                            "Equity Value = Enterprise Value - Net Debt\n"
-                            "Intrinsic Value / Share = Equity Value / Shares Outstanding",
+                            "Revenue_t = Revenue_(t-1) * (1 + revenue_growth)\n"
+                            "Net Income_t = Revenue_t * target_net_margin\n"
+                            "FCFE_t = Net Income_t * cash_flow_conversion_rate\n"
+                            "PV(FCFE_t) = FCFE_t / (1 + discount_rate)^t\n"
+                            "Terminal Value = FCFE_N * exit_multiple\n"
+                            "DCF Value / Share = (sum(PV of FCFE) + PV(Terminal Value)) / Shares",
                             language="text",
                         )
                         dcf_demo = pd.DataFrame({
                             "年度": [f"Year {year}" for year in range(1, 6)],
-                            "預估 FCFF ($B)": [fcf / 1e9 for fcf in scenario_fcfs],
-                            "折現後 FCFF ($B)": [pv / 1e9 for pv in scenario_pvs],
+                            "營收成長率": [g * 100 for g in scenario_growth_schedule],
+                            "預估 FCFE ($B)": [fcfe / 1e9 for fcfe in scenario_fcfs],
+                            "折現後 FCFE ($B)": [pv / 1e9 for pv in scenario_pvs],
                         })
                         st.dataframe(
                             dcf_demo.style.format({
-                                "預估 FCFF ($B)": "${:.2f}",
-                                "折現後 FCFF ($B)": "${:.2f}",
+                                "營收成長率": "{:.1f}%",
+                                "預估 FCFE ($B)": "${:.2f}",
+                                "折現後 FCFE ($B)": "${:.2f}",
                             }),
                             use_container_width=True,
                             hide_index=True,
                         )
                         demo1, demo2, demo3, demo4, demo5 = st.columns(5)
-                        demo1.metric("終值", f"${scenario_tv / 1e9:.2f}B")
+                        demo1.metric("退出終值", f"${scenario_tv / 1e9:.2f}B")
                         demo2.metric("終值現值", f"${scenario_pv_tv / 1e9:.2f}B")
                         demo3.metric("企業價值 EV", f"${scenario_ev / 1e9:.2f}B")
                         demo4.metric("股東權益價值", f"${scenario_eq / 1e9:.2f}B")
@@ -762,81 +1255,90 @@ if symbol:
             st.write("---")
             st.subheader("🎯 5. 技術面量價、均線趨勢分類與 MACD 背離掃描")
 
-            if df_hist.empty or len(df_hist) < 20:
+            if df_hist.empty:
                 st.warning("⚠️ 歷史交易 K 線資料不足，無法繪製技術面指標。")
             else:
-                df_hist["MA10"] = df_hist["Close"].rolling(10).mean()
-                df_hist["MA20"] = df_hist["Close"].rolling(20).mean()
-                df_hist["MA55"] = df_hist["Close"].rolling(55).mean()
-                
-                if len(df_hist) >= 250:
-                    df_hist["MA250"] = df_hist["Close"].rolling(250).mean()
-                    ma250_valid = True
-                    ma250_val = df_hist["MA250"].iloc[-1]
+                required_cols = ["Open", "High", "Low", "Close", "Volume"]
+                missing_cols = [c for c in required_cols if c not in df_hist.columns]
+                if missing_cols:
+                    st.warning(f"⚠️ 技術面資料缺少必要欄位：{missing_cols}，無法繪製技術圖表。")
                 else:
-                    ma250_valid = False
-                    ma250_val = 0.0
-
-                ema12 = df_hist["Close"].ewm(span=12, adjust=False).mean()
-                ema26 = df_hist["Close"].ewm(span=26, adjust=False).mean()
-                df_hist["MACD"] = ema12 - ema26
-                df_hist["Signal"] = df_hist["MACD"].ewm(span=9, adjust=False).mean()
-                df_hist["Hist"] = df_hist["MACD"] - df_hist["Signal"]
-
-                trend_status, trend_desc = classify_trend_status(df_hist)
-
-                all_divergences = scan_all_macd_divergences(df_hist)
-                if all_divergences:
-                    div_type = all_divergences[-1]["type"]
-
-                vol_ma20 = df_hist["Volume"].rolling(20).mean()
-                curr_vol = df_hist["Volume"].iloc[-1]
-                curr_ret = (df_hist["Close"].iloc[-1] - df_hist["Open"].iloc[-1]) / df_hist["Open"].iloc[-1]
-                high_20 = df_hist["High"].rolling(20).max().shift(1).iloc[-1]
-
-                if curr_vol > vol_ma20.iloc[-1] * 1.5 and curr_ret > 0.02 and df_hist["Close"].iloc[-1] > high_20:
-                    gunshot_signal = True
-
-                support_level, resistance_level = find_smart_support_resistance(df_hist)
-                poc_price = find_volume_poc(df_hist)
-
-                h_max = df_hist["High"].max()
-                l_min = df_hist["Low"].min()
-                fib_382 = h_max - (h_max - l_min) * 0.382
-                fib_500 = h_max - (h_max - l_min) * 0.500
-                fib_618 = h_max - (h_max - l_min) * 0.618
-
-                m10_val = df_hist["MA10"].iloc[-1]
-                m20_val = df_hist["MA20"].iloc[-1]
-                m55_val = df_hist["MA55"].iloc[-1]
-
-                st.info(f"📊 **當前趨勢評級：{trend_status}**\n\n{trend_desc}")
-
-                if gunshot_signal:
-                    st.success("🔥 **觸發 Livermore 第一槍爆發型態**：今日帶量突破近 20 日高點！")
-                else:
-                    st.caption("ℹ️ 今日未觸發第一槍帶量突破訊號。")
-
-                with st.expander("🔍 點擊查看近 2 年歷史 MACD 背離觸發時間點明細"):
-                    if all_divergences:
-                        div_df = pd.DataFrame(all_divergences)[['date', 'type', 'price', 'macd']]
-                        div_df['date'] = pd.to_datetime(div_df['date']).dt.strftime('%Y-%m-%d')
-                        st.dataframe(div_df, use_container_width=True)
+                    df_hist = df_hist.dropna(subset=required_cols).copy()
+                    if len(df_hist) < 20:
+                        st.warning("⚠️ 歷史交易 K 線資料不足，無法繪製技術面指標。")
                     else:
-                        st.info("近 2 年區間內未偵測到顯著 MACD 背離點位。")
+                        df_hist["MA10"] = df_hist["Close"].rolling(10).mean()
+                        df_hist["MA20"] = df_hist["Close"].rolling(20).mean()
+                        df_hist["MA55"] = df_hist["Close"].rolling(55).mean()
 
-            # ==========================================
-            # 6. 關鍵支撐/壓力位與黃金分割
-            # ==========================================
-            st.write("---")
-            st.subheader("🛡️ 6. 關鍵支撐/壓力位、籌碼密集區 (POC) 與斐波那契黃金分割")
+                        if len(df_hist) >= 250:
+                            df_hist["MA250"] = df_hist["Close"].rolling(250).mean()
+                            ma250_valid = True
+                            ma250_val = df_hist["MA250"].iloc[-1]
+                        else:
+                            ma250_valid = False
+                            ma250_val = 0.0
 
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("波段壓力位 (Resistance)", f"${resistance_level:.2f}")
-            k2.metric("波段支撐位 (Support)", f"${support_level:.2f}")
-            k3.metric("籌碼密集區 (POC)", f"${poc_price:.2f}")
-            k4.metric("斐波那契 (61.8%)", f"${fib_618:.2f}")
-            k5.metric("目前最新股價", f"${curr_price:.2f}")
+                        ema12 = df_hist["Close"].ewm(span=12, adjust=False).mean()
+                        ema26 = df_hist["Close"].ewm(span=26, adjust=False).mean()
+                        df_hist["MACD"] = ema12 - ema26
+                        df_hist["Signal"] = df_hist["MACD"].ewm(span=9, adjust=False).mean()
+                        df_hist["Hist"] = df_hist["MACD"] - df_hist["Signal"]
+
+                        trend_status, trend_desc = classify_trend_status(df_hist)
+
+                        all_divergences = scan_all_macd_divergences(df_hist)
+                        if all_divergences:
+                            div_type = all_divergences[-1]["type"]
+
+                        vol_ma20 = df_hist["Volume"].rolling(20).mean()
+                        curr_vol = df_hist["Volume"].iloc[-1]
+                        curr_ret = (df_hist["Close"].iloc[-1] - df_hist["Open"].iloc[-1]) / df_hist["Open"].iloc[-1]
+                        high_20 = df_hist["High"].rolling(20).max().shift(1).iloc[-1]
+
+                        if curr_vol > vol_ma20.iloc[-1] * 1.5 and curr_ret > 0.02 and df_hist["Close"].iloc[-1] > high_20:
+                            gunshot_signal = True
+
+                        support_level, resistance_level = find_smart_support_resistance(df_hist)
+                        poc_price = find_volume_poc(df_hist)
+
+                        h_max = df_hist["High"].max()
+                        l_min = df_hist["Low"].min()
+                        fib_382 = h_max - (h_max - l_min) * 0.382
+                        fib_500 = h_max - (h_max - l_min) * 0.500
+                        fib_618 = h_max - (h_max - l_min) * 0.618
+
+                        m10_val = df_hist["MA10"].iloc[-1]
+                        m20_val = df_hist["MA20"].iloc[-1]
+                        m55_val = df_hist["MA55"].iloc[-1]
+
+                        st.info(f"📊 **當前趨勢評級：{trend_status}**\n\n{trend_desc}")
+
+                        if gunshot_signal:
+                            st.success("🔥 **觸發 Livermore 第一槍爆發型態**：今日帶量突破近 20 日高點！")
+                        else:
+                            st.caption("ℹ️ 今日未觸發第一槍帶量突破訊號。")
+
+                        with st.expander("🔍 點擊查看近 2 年歷史 MACD 背離觸發時間點明細"):
+                            if all_divergences:
+                                div_df = pd.DataFrame(all_divergences)[['date', 'type', 'price', 'macd']]
+                                div_df['date'] = pd.to_datetime(div_df['date']).dt.strftime('%Y-%m-%d')
+                                st.dataframe(div_df, use_container_width=True)
+                            else:
+                                st.info("近 2 年區間內未偵測到顯著 MACD 背離點位。")
+
+                        # ==========================================
+                        # 6. 關鍵支撐/壓力位與黃金分割
+                        # ==========================================
+                        st.write("---")
+                        st.subheader("🛡️ 6. 關鍵支撐/壓力位、籌碼密集區 (POC) 與斐波那契黃金分割")
+
+                        k1, k2, k3, k4, k5 = st.columns(5)
+                        k1.metric("波段壓力位 (Resistance)", f"${resistance_level:.2f}")
+                        k2.metric("波段支撐位 (Support)", f"${support_level:.2f}")
+                        k3.metric("籌碼密集區 (POC)", f"${poc_price:.2f}")
+                        k4.metric("斐波那契 (61.8%)", f"${fib_618:.2f}")
+                        k5.metric("目前最新股價", f"${curr_price:.2f}")
 
             # ==========================================
             # 7. 機構級全方位分析報告
