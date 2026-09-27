@@ -1,5 +1,6 @@
 import json
 import urllib.request
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -13,42 +14,319 @@ st.set_page_config(
     page_title="Pro Stock Analysis & Watchlist Platform", page_icon="⚡", layout="wide"
 )
 
-# ==========================================
-# 0. Watchlist (自訂觀察清單 - Session State)
-# ==========================================
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = ["NVDA", "AAPL", "TSLA", "MSFT", "AMZN", "META"]
+DEFAULT_WATCHLIST = """NOK.US
+PEP.US
+WM.US
+PANW.US
+AXTI.US
+CIEN.US
+ATI.US
+MCD.US
+CRCL.US
+RAM.US
+.SKEW.US
+JEPQ.US
+PSI.US
+AIS.US
+RMBS.US
+SPCX.US
+CRDO.US
+AGX.US
+RKLB.US
+ROK.US
+ENTG.US
+IOO.US
+FLEX.US
+V.US
+TMO.US
+BTI.US
+HPE.US
+AMAT.US
+WFC.US
+FISV.US
+ABEV.US
+SPYM.US
+XYZ.US
+ENPH.US
+GEV.US
+DELL.US
+ZETA.US
+MUU.US
+VSAT.US
+STM.US
+SNOW.US
+VRT.US
+PL.US
+.SPX.US
+EQT.US
+VST.US
+GLW.US
+DRAM.US
+NOW.US
+BE.US
+SOXX.US
+TTMI.US
+CLS.US
+VCX.US
+AAOI.US
+TEVA.US
+LIST2591.US
+MRVL.US
+CSCO.US
+LITE.US
+SCCO.US
+LIST22865.US
+CAT.US
+USAR.US
+VTI.US
+IWO.US
+JPM.US
+O.US
+GILT.US
+CVX.US
+CLmain.US
+SLV.US
+VT.US
+SYM.US
+CVNA.US
+P.US
+ILMN.US
+SNDK.US
+EBAY.US
+.RUT.US
+WDC.US
+CLOV.US
+RIGL.US
+ISRG.US
+ONDS.US
+DHR.US
+SMCI.US
+SARO.US
+VIXY.US
+INFQ.US
+MSFT.US
+NVO.US
+RBRK.US
+F.US
+DAL.US
+MU.US
+MS.US
+DUK.US
+ADBE.US
+WOLF.ESC.US
+PPL.US
+AVGO.US
+ASTS.US
+CRWD.US
+IONQ.US
+LEN.US
+COST.US
+ORCL.US
+IREN.US
+CRM.US
+LLY.US
+BWXT.US
+RTX.US
+INTC.US
+JNJ.US
+SPMO.US
+UPST.US
+CORZ.US
+RDDT.US
+LMND.US
+NBIS.US
+MP.US
+NB.US
+AEO.US
+AMZN.US
+UNH.US
+SOFI.US
+NRG.US
+ARKK.US
+JOBY.US
+QCOM.US
+DLO.US
+ASML.US
+ARM.US
+AMD.US
+BBAI.US
+NKE.US
+META.US
+ALAB.US
+HOOD.US
+DJT.US
+BLK.US
+LIST20883.US
+SPOT.US
+APLD.US
+QBTS.US
+CRWV.US
+TQQQ.US
+DIS.US
+WMT.US
+GOOG.US
+IAU.US
+GLD.US
+NFLX.US
+BRK.B.US
+QQQ.US
+PLTR.US
+SPYG.US
+VOOG.US
+VOO.US
+TSM.US
+PDD.US
+NVDA.US
+AAPL.US
+TSLA.US
+FUTU.US
+EWJ.US
+00005.HK
+01888.HK
+03121.HK
+01810.HK
+02259.HK
+02382.HK
+00522.HK
+03454.HK
+07709.HK
+00992.HK
+06869.HK
+03277.HK
+06288.HK
+07747.HK
+03317.HK
+02513.HK
+09880.HK
+01768.HK
+02050.HK
+00100.HK
+03986.HK
+03696.HK
+02693.HK
+01024.HK
+01347.HK
+09888.HK
+00981.HK
+02432.HK
+09866.HK
+09868.HK
+00116.HK
+00939.HK
+02631.HK
+00288.HK
+02577.HK
+03448.HK
+01788.HK
+00002.HK
+09618.HK
+01929.HK
+00941.HK
+03750.HK
+09992.HK
+06181.HK
+09988.HK
+02097.HK
+00700.HK
+800000.HK""".splitlines()
+WATCHLIST_PATH = Path(__file__).with_name("watchlist.json")
+WATCHLIST_REVISION = 2
 
-st.sidebar.title("⭐ 我的觀察清單 (Watchlist)")
 
-new_symbol = st.sidebar.text_input("新增股票代碼:", "").strip().upper()
-if st.sidebar.button("➕ 加入清單"):
-    if new_symbol and new_symbol not in st.session_state.watchlist:
-        st.session_state.watchlist.append(new_symbol)
-        st.sidebar.success(f"已加入 {new_symbol}")
+def to_yfinance_symbol(symbol):
+    normalized = symbol.strip().upper()
+    if normalized.endswith(".US"):
+        normalized = normalized[:-3]
+    if normalized.endswith(".HK"):
+        hong_kong_code = normalized[:-3]
+        if hong_kong_code.isdigit() and len(hong_kong_code) == 5:
+            normalized = f"{hong_kong_code[1:]}.HK"
+    special_symbols = {
+        ".SKEW": "^SKEW",
+        ".SPX": "^GSPC",
+        ".RUT": "^RUT",
+        "CLMAIN": "CL=F",
+        "BRK.B": "BRK-B",
+    }
+    if normalized in special_symbols:
+        return special_symbols[normalized]
+    if normalized.endswith(".ESC"):
+        normalized = normalized[:-4]
+    return normalized
 
-selected_from_watchlist = st.sidebar.selectbox(
-    "快速切換觀察清單：",
-    options=["-- 請選擇 --"] + st.session_state.watchlist,
-    index=0
+
+def load_watchlist():
+    try:
+        saved = json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
+        if isinstance(saved, list):
+            symbols = list(dict.fromkeys(
+                value.strip().upper() for value in saved
+                if isinstance(value, str) and value.strip()
+            ))
+            return symbols
+    except (OSError, json.JSONDecodeError):
+        pass
+    return DEFAULT_WATCHLIST.copy()
+
+
+def save_watchlist(symbols):
+    WATCHLIST_PATH.write_text(json.dumps(symbols, indent=2) + "\n", encoding="utf-8")
+
+
+if st.session_state.get("watchlist_revision") != WATCHLIST_REVISION:
+    st.session_state.watchlist = load_watchlist()
+    st.session_state.watchlist_revision = WATCHLIST_REVISION
+    if not WATCHLIST_PATH.exists():
+        save_watchlist(st.session_state.watchlist)
+
+st.sidebar.title("⭐ Watchlist Manager")
+with st.sidebar.form("watchlist_add_form"):
+    new_symbol = st.text_input("Stock ticker", key="new_watchlist_symbol").strip().upper()
+    add_symbol = st.form_submit_button("Add ticker", use_container_width=True)
+if add_symbol and new_symbol and new_symbol not in st.session_state.watchlist:
+    st.session_state.watchlist.append(new_symbol)
+    save_watchlist(st.session_state.watchlist)
+    st.rerun()
+
+with st.sidebar.expander(f"Saved tickers ({len(st.session_state.watchlist)})"):
+    if st.session_state.watchlist:
+        st.dataframe(
+            pd.DataFrame({"Ticker": st.session_state.watchlist}),
+            height=260,
+            hide_index=True,
+            use_container_width=True,
+        )
+        ticker_to_remove = st.selectbox(
+            "Ticker to remove", st.session_state.watchlist, key="ticker_to_remove"
+        )
+        if st.button("Remove selected ticker", key="remove_selected_ticker", use_container_width=True):
+            st.session_state.watchlist.remove(ticker_to_remove)
+            save_watchlist(st.session_state.watchlist)
+            st.rerun()
+    else:
+        st.caption("The watchlist is empty.")
+
+st.sidebar.caption("Only saved tickers are scanned.")
+app_view = st.radio(
+    "Workspace", ["Scanner Dashboard", "Stock Analysis"],
+    horizontal=True, key="app_view",
 )
-
-st.sidebar.write("---")
-st.sidebar.write("📜 **目前清單股票：**")
-for w_sym in st.session_state.watchlist:
-    c_w1, c_w2 = st.sidebar.columns([3, 1])
-    c_w1.write(f"• **{w_sym}**")
-    if c_w2.button("❌", key=f"del_{w_sym}"):
-        st.session_state.watchlist.remove(w_sym)
-        st.rerun()
-
-st.title("⚡ Livermore & Lynch 機構級股票分析平台")
-
-col_search, _ = st.columns([1, 2])
-with col_search:
-    manual_symbol = st.text_input("輸入股票代碼 (例: NVDA, AAPL, TSLA, 2330.TW):", "NVDA").strip().upper()
-
-symbol = selected_from_watchlist if selected_from_watchlist != "-- 請選擇 --" else manual_symbol
+selected_from_watchlist = "-- Select --"
+if app_view == "Stock Analysis":
+    st.title("⚡ Livermore & Lynch 機構級股票分析平台")
+    selected_from_watchlist = st.sidebar.selectbox(
+        "Quick switch", ["-- Select --"] + st.session_state.watchlist
+    )
+    col_search, _ = st.columns([1, 2])
+    with col_search:
+        manual_symbol = st.text_input(
+            "輸入股票代碼 (例: NVDA, AAPL, TSLA, 2330.TW):",
+            value=st.session_state.get("analysis_symbol", "NVDA"),
+            key="manual_symbol_input",
+        ).strip().upper()
+    symbol = selected_from_watchlist if selected_from_watchlist != "-- Select --" else manual_symbol
+else:
+    symbol = st.session_state.get("analysis_symbol", "")
 
 # ==========================================
 # Caching & Helper Functions
@@ -74,7 +352,7 @@ def get_cnn_fear_and_greed():
     except Exception:
         return None, "CNN unavailable"
 
-@st.cache_data(ttl=14400)
+@st.cache_data(ttl=300)
 def get_risk_free_rate():
     """Fetches real-time 10-Year US Treasury Yield (^TNX) as Risk-Free Rate"""
     try:
@@ -86,9 +364,15 @@ def get_risk_free_rate():
         pass
     return 0.042
 
-@st.cache_data(ttl=1800)
+
+@st.cache_data(ttl=300)
+def get_vix_value():
+    history = yf.Ticker("^VIX").history(period="5d")
+    return float(history["Close"].iloc[-1]) if not history.empty else 20.0
+
+@st.cache_data(ttl=300)
 def fetch_ticker_data(symbol_str):
-    t = yf.Ticker(symbol_str)
+    t = yf.Ticker(to_yfinance_symbol(symbol_str))
     info = t.info or {}
     hist = t.history(period="2y")
     bs = t.balance_sheet
@@ -99,8 +383,75 @@ def fetch_ticker_data(symbol_str):
     q_cf = t.quarterly_cashflow
     return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
 
+
+@st.cache_data(ttl=300)
+def fetch_scanner_history(symbol_str):
+    return yf.Ticker(to_yfinance_symbol(symbol_str)).history(period="6mo", interval="1d")
+
+
+def find_dual_divergences(history, lookback_days=90, window=3):
+    """Compare RSI and MACD at matching price pivots within the lookback window."""
+    required = {"High", "Low", "Close"}
+    if history.empty or not required.issubset(history.columns):
+        return []
+
+    data = history.copy().dropna(subset=["High", "Low", "Close"]).sort_index()
+    data["RSI"] = calculate_rsi(data["Close"], 14)
+    data["MACD"] = data["Close"].ewm(span=12, adjust=False).mean() - data["Close"].ewm(span=26, adjust=False).mean()
+    cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=lookback_days)
+    if getattr(data.index, "tz", None) is not None:
+        cutoff = cutoff.tz_localize(data.index.tz)
+
+    lows, highs = [], []
+    prices_low = data["Low"].to_numpy(dtype=float)
+    prices_high = data["High"].to_numpy(dtype=float)
+    for index in range(window, len(data) - window):
+        date = data.index[index]
+        if date < cutoff:
+            continue
+        row = data.iloc[index]
+        if all(prices_low[index] <= prices_low[index - offset] for offset in range(1, window + 1)) and all(
+            prices_low[index] <= prices_low[index + offset] for offset in range(1, window + 1)
+        ):
+            lows.append((index, date, prices_low[index], float(row["RSI"]), float(row["MACD"])))
+        if all(prices_high[index] >= prices_high[index - offset] for offset in range(1, window + 1)) and all(
+            prices_high[index] >= prices_high[index + offset] for offset in range(1, window + 1)
+        ):
+            highs.append((index, date, prices_high[index], float(row["RSI"]), float(row["MACD"])))
+
+    signals = []
+    for pivots, bullish in ((lows, True), (highs, False)):
+        for first, second in zip(pivots, pivots[1:]):
+            index_1, date_1, price_1, rsi_1, macd_1 = first
+            index_2, date_2, price_2, rsi_2, macd_2 = second
+            price_condition = price_2 < price_1 if bullish else price_2 > price_1
+            indicators_condition = (rsi_2 > rsi_1 and macd_2 > macd_1) if bullish else (rsi_2 < rsi_1 and macd_2 < macd_1)
+            if price_condition and indicators_condition:
+                trigger_close = float(data["Close"].iloc[index_2])
+                latest_price = float(data["Close"].iloc[-1])
+                price_change = latest_price - trigger_close
+                signals.append({
+                    "Signal Type": "Bullish" if bullish else "Bearish",
+                    "Trigger Date": date_2,
+                    "Price": price_2,
+                    "Trigger Close": trigger_close,
+                    "Latest Price": latest_price,
+                    "Change ($)": price_change,
+                    "Change (%)": (price_change / trigger_close * 100) if trigger_close else np.nan,
+                    "RSI": rsi_2,
+                    "MACD": macd_2,
+                    "First Date": date_1,
+                    "First Price": price_1,
+                    "First RSI": rsi_1,
+                    "First MACD": macd_1,
+                    "Second Price": price_2,
+                    "Second RSI": rsi_2,
+                    "Second MACD": macd_2,
+                })
+    return sorted(signals, key=lambda signal: signal["Trigger Date"])
+
 def map_symbol_for_tradingview(symbol_input):
-    sym = symbol_input.upper().strip()
+    sym = to_yfinance_symbol(symbol_input)
     if sym.endswith(".TW") or sym.endswith(".TWO"):
         code = sym.split(".")[0]
         return f"TPE:{code}"
@@ -492,6 +843,187 @@ def scan_all_macd_divergences(df, window=5, min_gap_days=10):
 
     return filtered_divergences
 
+
+def scan_indicator_divergences(df, indicator_column, window=5, min_gap_days=10):
+    """Find price/indicator swing divergences for RSI or another oscillator."""
+    if len(df) < (window * 2 + 5) or indicator_column not in df.columns:
+        return []
+
+    prices = df["Close"].to_numpy(dtype=float)
+    indicator = df[indicator_column].to_numpy(dtype=float)
+    dates = df.index
+    piv_lows = []
+    piv_highs = []
+    for index in range(window, len(df) - window):
+        if not np.isfinite(indicator[index]):
+            continue
+        if all(prices[index] <= prices[index - offset] for offset in range(1, window + 1)) and all(
+            prices[index] <= prices[index + offset] for offset in range(1, window + 1)
+        ):
+            piv_lows.append((index, dates[index], prices[index], indicator[index]))
+        if all(prices[index] >= prices[index - offset] for offset in range(1, window + 1)) and all(
+            prices[index] >= prices[index + offset] for offset in range(1, window + 1)
+        ):
+            piv_highs.append((index, dates[index], prices[index], indicator[index]))
+
+    divergences = []
+    for pivots, bullish in ((piv_lows, True), (piv_highs, False)):
+        for first, second in zip(pivots, pivots[1:]):
+            index_1, date_1, price_1, value_1 = first
+            index_2, date_2, price_2, value_2 = second
+            if index_2 - index_1 > 60:
+                continue
+            is_divergence = (price_2 < price_1 and value_2 > value_1) if bullish else (price_2 > price_1 and value_2 < value_1)
+            if is_divergence:
+                divergences.append({
+                    "index": index_2,
+                    "date": date_2,
+                    "type": "看多背離 (Bullish)" if bullish else "看空背離 (Bearish)",
+                    "price": price_2,
+                    "indicator": value_2,
+                })
+
+    divergences.sort(key=lambda item: item["index"])
+    filtered = []
+    for divergence in divergences:
+        if not filtered or divergence["index"] - filtered[-1]["index"] >= min_gap_days or divergence["type"] != filtered[-1]["type"]:
+            filtered.append(divergence)
+        else:
+            filtered[-1] = divergence
+    return filtered
+
+
+def calculate_rsi(series, period=14):
+    """Calculate Wilder-style RSI while preserving the source index."""
+    delta = series.diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    average_gain = gains.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    average_loss = losses.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    relative_strength = average_gain / average_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + relative_strength))
+    return rsi.fillna(100.0).where(average_gain > 0, 0.0)
+
+
+def summarize_bollinger_state(df):
+    """Return current Bollinger condition labels for narrative and UI output."""
+    if df.empty or "BB_Upper" not in df.columns:
+        return {"squeeze": False, "tag": "Neutral", "percent_b": np.nan, "bandwidth": np.nan}
+    latest = df.iloc[-1]
+    squeeze = bool(latest["BB_Bandwidth"] <= df["BB_Bandwidth"].rolling(120, min_periods=20).quantile(0.20).iloc[-1])
+    close = float(latest["Close"])
+    upper = float(latest["BB_Upper"])
+    lower = float(latest["BB_Lower"])
+    tolerance = max((upper - lower) * 0.05, close * 0.002)
+    if close >= upper - tolerance:
+        tag = "Upper Band Tag"
+    elif close <= lower + tolerance:
+        tag = "Lower Band Tag"
+    else:
+        tag = "Neutral"
+    return {"squeeze": squeeze, "tag": tag, "percent_b": float(latest["BB_%B"]), "bandwidth": float(latest["BB_Bandwidth"])}
+
+
+@st.cache_data(ttl=300)
+def fetch_options_analysis(symbol_str, current_price):
+    """Fetch near-term option chains and summarize PCR, IV, max pain, and UOA."""
+    try:
+        ticker = yf.Ticker(to_yfinance_symbol(symbol_str))
+        today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+        expirations = []
+        for expiry in ticker.options or ():
+            expiry_date = pd.Timestamp(expiry)
+            days_to_expiry = (expiry_date - today).days
+            if 0 <= days_to_expiry <= 45:
+                expirations.append((expiry, expiry_date))
+        if not expirations:
+            return {"available": False, "message": "近 45 天內沒有可用的選擇權到期日。"}
+
+        chain_frames = []
+        for expiry, expiry_date in expirations:
+            chain = ticker.option_chain(expiry)
+            for option_type, frame in (("Call", chain.calls), ("Put", chain.puts)):
+                if frame is None or frame.empty:
+                    continue
+                option_frame = frame.copy()
+                option_frame["Expiry"] = expiry_date.strftime("%Y-%m-%d")
+                option_frame["Option Type"] = option_type
+                chain_frames.append(option_frame)
+        if not chain_frames:
+            return {"available": False, "message": "券商未提供近期期權鏈資料。"}
+
+        options = pd.concat(chain_frames, ignore_index=True)
+        for column in ["volume", "openInterest", "impliedVolatility", "lastPrice", "strike"]:
+            if column not in options:
+                options[column] = 0.0
+            options[column] = pd.to_numeric(options[column], errors="coerce").fillna(0.0)
+        options["Vol/OI Ratio"] = np.where(options["openInterest"] > 0, options["volume"] / options["openInterest"], np.inf)
+        options["Estimated Trade Value"] = options["volume"] * options["lastPrice"] * 100
+
+        calls = options[options["Option Type"] == "Call"]
+        puts = options[options["Option Type"] == "Put"]
+        call_volume = calls["volume"].sum()
+        put_volume = puts["volume"].sum()
+        call_oi = calls["openInterest"].sum()
+        put_oi = puts["openInterest"].sum()
+        pcr_volume = put_volume / call_volume if call_volume > 0 else np.nan
+        pcr_oi = put_oi / call_oi if call_oi > 0 else np.nan
+
+        strikes = sorted(options["strike"].unique())
+        max_pain = np.nan
+        if strikes:
+            pain_by_strike = {}
+            for settlement in strikes:
+                call_pain = ((settlement - calls["strike"]).clip(lower=0) * calls["openInterest"]).sum()
+                put_pain = ((puts["strike"] - settlement).clip(lower=0) * puts["openInterest"]).sum()
+                pain_by_strike[settlement] = call_pain + put_pain
+            max_pain = min(pain_by_strike, key=pain_by_strike.get)
+
+        atm_distance = (options["strike"] - float(current_price)).abs()
+        near_money = options.loc[atm_distance <= max(float(current_price) * 0.10, 1.0)]
+        call_iv = near_money.loc[near_money["Option Type"] == "Call", "impliedVolatility"]
+        put_iv = near_money.loc[near_money["Option Type"] == "Put", "impliedVolatility"]
+        iv_summary = {
+            "Call IV": float(call_iv.replace(0, np.nan).median()) if not call_iv.empty else np.nan,
+            "Put IV": float(put_iv.replace(0, np.nan).median()) if not put_iv.empty else np.nan,
+        }
+        iv_summary["Put-Call IV Skew"] = iv_summary["Put IV"] - iv_summary["Call IV"] if pd.notna(iv_summary["Put IV"]) and pd.notna(iv_summary["Call IV"]) else np.nan
+
+        unusual = options[(options["volume"] > 2.5 * options["openInterest"]) & (options["volume"] > 1000)].copy()
+        unusual = unusual.sort_values(["Estimated Trade Value", "volume"], ascending=False)
+        unusual = unusual.rename(columns={
+            "strike": "Strike Price", "impliedVolatility": "Implied Volatility",
+            "volume": "Volume", "openInterest": "Open Interest", "lastPrice": "Last Price",
+        })
+        display_columns = ["Strike Price", "Expiry", "Option Type", "Volume", "Open Interest", "Vol/OI Ratio", "Implied Volatility", "Estimated Trade Value"]
+        return {
+            "available": True,
+            "expirations": [expiry for expiry, _ in expirations],
+            "pcr_volume": pcr_volume,
+            "pcr_oi": pcr_oi,
+            "max_pain": max_pain,
+            "iv_summary": iv_summary,
+            "unusual": unusual[display_columns],
+            "call_volume": call_volume,
+            "put_volume": put_volume,
+        }
+    except Exception as error:
+        return {"available": False, "message": f"選擇權資料暫時無法取得：{error}"}
+
+
+def interpret_options_flow(options_summary):
+    """Provide a transparent, rule-based interpretation of unusual options flow."""
+    unusual = options_summary.get("unusual", pd.DataFrame())
+    if unusual.empty:
+        return "目前沒有符合 Volume > 2.5x OI 且 Volume > 1,000 的異常大單。"
+    call_value = unusual.loc[unusual["Option Type"] == "Call", "Estimated Trade Value"].sum()
+    put_value = unusual.loc[unusual["Option Type"] == "Put", "Estimated Trade Value"].sum()
+    if call_value > put_value * 1.5:
+        return "異常流量以 Call 名目金額為主，顯示智能資金偏向積極做多，但仍需結合 IV 與成交價判斷是否為買方。"
+    if put_value > call_value * 1.5:
+        return "異常流量以 Put 名目金額為主，較接近下行避險或偏空布局，需觀察 Put IV Skew 是否同步走高。"
+    return "Call 與 Put 異常流量相對均衡，可能包含跨式策略或波動率交易，暫不宜解讀為單方向押注。"
+
 def find_smart_support_resistance(df, window=5):
     if df.empty or len(df) < 30:
         fallback_low = df['Low'].min() if not df.empty else 10.0
@@ -532,7 +1064,7 @@ def find_volume_poc(df, bins=15):
     poc_price = (bin_edges[max_idx] + bin_edges[max_idx+1]) / 2.0
     return poc_price
 
-def generate_technical_narrative(symbol, curr_price, ma10, ma20, ma55, ma250, gunshot, div_type, support, resistance, fib_618, poc_price, trend_status, trend_desc, ma250_valid=True):
+def generate_technical_narrative(symbol, curr_price, ma10, ma20, ma55, ma250, gunshot, div_type, support, resistance, fib_618, poc_price, trend_status, trend_desc, ma250_valid=True, rsi_value=None, rsi_div_type="Neutral", bollinger_state=None, macd_divergence=False):
     narrative = []
     
     narrative.append(f"**【均線型態與趨勢等級】**\n當前標的經多因子模型分類為：**{trend_status}**。\n{trend_desc}")
@@ -543,7 +1075,15 @@ def generate_technical_narrative(symbol, curr_price, ma10, ma20, ma55, ma250, gu
         div_desc = "指標面上，近期出現「看空背離」預警。股價攀高過程中動能未同步放大，提防高檔誘多後的回檔修正。"
     else:
         div_desc = "指標面上，MACD 與價格同步運行，未見明顯動能背離。"
-    narrative.append(f"**【指標動能與背離分析】**\n{div_desc}")
+    rsi_value = float(rsi_value) if rsi_value is not None and pd.notna(rsi_value) else np.nan
+    bollinger_state = bollinger_state or {"squeeze": False, "tag": "Neutral", "percent_b": np.nan}
+    rsi_state = "超買" if rsi_value > 70 else "超賣" if rsi_value < 30 else "中性"
+    rsi_desc = f"RSI(14) 為 {rsi_value:.1f}（{rsi_state}）"
+    if rsi_div_type != "Neutral":
+        rsi_desc += f"，並出現 {rsi_div_type}。"
+    else:
+        rsi_desc += "，尚未發現 RSI 背離。"
+    narrative.append(f"**【指標動能與背離分析】**\n{div_desc}\n{rsi_desc}")
 
     dist_to_supp = ((curr_price - support) / curr_price) * 100 if curr_price > 0 else 0
     dist_to_res = ((resistance - curr_price) / curr_price) * 100 if curr_price > 0 else 0
@@ -551,9 +1091,19 @@ def generate_technical_narrative(symbol, curr_price, ma10, ma20, ma55, ma250, gu
     of_desc += f" 籌碼最大密集區 (POC) 落在 **${poc_price:.2f}**。"
     if curr_price > 0 and abs(curr_price - fib_618) / curr_price < 0.02:
         of_desc += f" 值得注意，當前股價接近斐波那契黃金分割支撐 61.8% (**${fib_618:.2f}**)，具備機構買盤防守力道。"
+    if bollinger_state.get("tag") != "Neutral":
+        of_desc += f" Bollinger {bollinger_state['tag']}，%B={bollinger_state.get('percent_b', np.nan):.2f}。"
+    if bollinger_state.get("squeeze"):
+        of_desc += " Bollinger Bandwidth 位於近期低分位，屬波動壓縮狀態，需留意突破。"
     narrative.append(f"**【關鍵關卡與訂單流佈局】**\n{of_desc}")
 
-    if gunshot and (div_type != "看空背離 (Bearish)"):
+    confluence_entry = (
+        bollinger_state.get("tag") == "Lower Band Tag"
+        or (curr_price > 0 and abs(curr_price - fib_618) / curr_price < 0.02)
+    ) and (rsi_div_type == "看多背離 (Bullish)" or div_type == "看多背離 (Bullish)")
+    if confluence_entry:
+        decision = "🎯 **機構策略**：價格位於 Bollinger 下軌或 61.8% 支撐附近，且 RSI/MACD 出現看多背離，形成高信念反轉共振，可採分批建倉並以支撐失守控管風險。"
+    elif gunshot and (div_type != "看空背離 (Bearish)"):
         decision = "🎯 **機構策略**：符合 Livermore 第一槍爆發型態（爆量+突破），且無空頭背離，可採取順勢突破建倉策略，將停損設於突破 K 棒低點。"
     elif div_type == "看多背離 (Bullish)" and curr_price <= support * 1.05:
         decision = "🎯 **機構策略**：符合弱勢左側抄底買點（看多背離 + 近關鍵支撐區），風險報酬比優良，適合分批佈局。"
@@ -565,7 +1115,84 @@ def generate_technical_narrative(symbol, curr_price, ma10, ma20, ma55, ma250, gu
     
     return "\n\n".join(narrative)
 
-if symbol:
+
+def open_scanner_signal():
+    selected_signal = st.session_state.get("scanner_signal_choice")
+    signal = st.session_state.get("scanner_signal_options", {}).get(selected_signal)
+    if signal:
+        st.session_state.analysis_symbol = signal["Ticker"]
+        st.session_state.manual_symbol_input = signal["Ticker"]
+        st.session_state.selected_scanner_signal = signal
+        st.session_state.app_view = "Stock Analysis"
+
+
+if app_view == "Scanner Dashboard":
+    st.title("📡 Watchlist Dual Divergence Scanner")
+    st.caption("Daily RSI(14) and MACD(12,26,9) must confirm at the same price-pivot candle within the last 90 calendar days.")
+    scan_rows = []
+    scan_errors = []
+    total_tickers = len(st.session_state.watchlist)
+    scan_progress = st.progress(0, text="Scanning saved watchlist...") if total_tickers else None
+    for ticker_index, ticker_symbol in enumerate(st.session_state.watchlist, start=1):
+        try:
+            ticker_history = fetch_scanner_history(ticker_symbol)
+            for signal in find_dual_divergences(ticker_history):
+                scan_rows.append({"Ticker": ticker_symbol, **signal})
+        except Exception as error:
+            scan_errors.append(f"{ticker_symbol}: {error}")
+        if scan_progress:
+            scan_progress.progress(ticker_index / total_tickers, text=f"Scanning {ticker_symbol} ({ticker_index}/{total_tickers})")
+    if scan_progress:
+        scan_progress.empty()
+
+    scan_frame = pd.DataFrame(scan_rows)
+    bullish_count = int((scan_frame["Signal Type"] == "Bullish").sum()) if not scan_frame.empty else 0
+    bearish_count = int((scan_frame["Signal Type"] == "Bearish").sum()) if not scan_frame.empty else 0
+    metric_bull, metric_bear, metric_total = st.columns(3)
+    metric_bull.metric("🚀 Bullish alerts", bullish_count)
+    metric_bear.metric("🚨 Bearish alerts", bearish_count)
+    metric_total.metric("Watchlist tickers", len(st.session_state.watchlist))
+    if scan_errors:
+        with st.expander(f"Unavailable symbols ({len(scan_errors)})"):
+            st.caption("These tickers could not be loaded from Yahoo Finance in this scan.")
+            st.write("\n".join(scan_errors))
+
+    if scan_frame.empty:
+        st.info("No same-day dual divergence alerts were found in the saved watchlist during the last 90 days.")
+    else:
+        st.caption("Price is the divergence pivot; performance is measured from the trigger-day close to the latest available daily price.")
+        display_frame = scan_frame[[
+            "Ticker", "Signal Type", "Trigger Date", "Price", "Trigger Close",
+            "Latest Price", "Change ($)", "Change (%)", "RSI", "MACD",
+        ]].copy()
+        display_frame["Trigger Date"] = display_frame["Trigger Date"].map(
+            lambda trigger_date: pd.Timestamp(trigger_date).strftime("%Y-%m-%d")
+        )
+        st.dataframe(
+            display_frame.style.format({
+                "Price": "${:.2f}", "Trigger Close": "${:.2f}", "Latest Price": "${:.2f}",
+                "Change ($)": "{:+.2f}", "Change (%)": "{:+.2f}%", "RSI": "{:.1f}", "MACD": "{:.3f}",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        signal_options = {}
+        for _, signal_row in scan_frame.iterrows():
+            trigger_date = pd.Timestamp(signal_row["Trigger Date"]).strftime("%Y-%m-%d")
+            label = f"{signal_row['Ticker']} | {signal_row['Signal Type']} | {trigger_date}"
+            if label in signal_options:
+                label += f" | ${signal_row['Price']:.2f}"
+            signal_options[label] = signal_row.to_dict()
+        st.session_state.scanner_signal_options = signal_options
+        st.selectbox(
+            "Select Matching Stock",
+            options=["-- Select a matching alert --"] + list(signal_options),
+            key="scanner_signal_choice",
+            on_change=open_scanner_signal,
+        )
+
+if symbol and app_view == "Stock Analysis":
     try:
         info, df_hist, bs, fin, cf_df, q_fin, q_bs, q_cf = fetch_ticker_data(symbol)
 
@@ -576,6 +1203,26 @@ if symbol:
             z_score = None
             z_status = "N/A"
             curr_price = info.get("currentPrice") or info.get("regularMarketPrice") or (df_hist["Close"].iloc[-1] if not df_hist.empty else 0.0)
+            price_low = info.get("fiftyTwoWeekLow")
+            price_high = info.get("fiftyTwoWeekHigh")
+            analyst_target = info.get("targetMeanPrice") or info.get("targetMedianPrice")
+            implied_upside = ((analyst_target / curr_price) - 1) * 100 if analyst_target and curr_price else None
+            fundamental_cards = st.columns(4)
+            fundamental_cards[0].metric("Current Price", f"${curr_price:.2f}" if curr_price else "N/A")
+            fundamental_cards[1].metric(
+                "Trailing / Forward P/E",
+                f"{info.get('trailingPE') or float('nan'):.2f} / {info.get('forwardPE') or float('nan'):.2f}"
+                if info.get("trailingPE") or info.get("forwardPE") else "N/A",
+            )
+            fundamental_cards[2].metric(
+                "52-Week Range",
+                f"${price_low:.2f} - ${price_high:.2f}" if price_low and price_high else "N/A",
+            )
+            fundamental_cards[3].metric(
+                "Analyst Target / Upside",
+                f"${analyst_target:.2f}" if analyst_target else "N/A",
+                delta=f"{implied_upside:+.1f}% implied upside" if implied_upside is not None else None,
+            )
             gunshot_signal = False
             trend_status = "資料不足 / 無法判斷"
             trend_desc = ""
@@ -586,15 +1233,19 @@ if symbol:
             poc_price = curr_price
             fib_382 = fib_500 = fib_618 = curr_price
             ma250_valid = False
+            rsi_value = np.nan
+            rsi_div_type = "Neutral"
+            rsi_divergences = []
+            bollinger_state = {"squeeze": False, "tag": "Neutral", "percent_b": np.nan, "bandwidth": np.nan}
+            ma250_val = 0.0
+            m10_val = m20_val = m55_val = curr_price
 
             # ==========================================
             # 1. 全球大盤情緒：VIX & CNN Fear and Greed 策略買點
             # ==========================================
             st.subheader("🌐 1. 全球市場情緒與 VIX 抄底濾網 (Market Sentiment & VIX Filter)")
             
-            vix_ticker = yf.Ticker("^VIX")
-            vix_hist = vix_ticker.history(period="5d")
-            vix_val = vix_hist["Close"].iloc[-1] if not vix_hist.empty else 20.0
+            vix_val = get_vix_value()
             
             cnn_fng_val, cnn_fng_status = get_cnn_fear_and_greed()
 
@@ -1270,6 +1921,20 @@ if symbol:
                         df_hist["MA10"] = df_hist["Close"].rolling(10).mean()
                         df_hist["MA20"] = df_hist["Close"].rolling(20).mean()
                         df_hist["MA55"] = df_hist["Close"].rolling(55).mean()
+                        df_hist["EMA20"] = df_hist["Close"].ewm(span=20, adjust=False).mean()
+                        df_hist["EMA50"] = df_hist["Close"].ewm(span=50, adjust=False).mean()
+                        df_hist["RSI14"] = calculate_rsi(df_hist["Close"], 14)
+                        df_hist["BB_Middle"] = df_hist["Close"].rolling(20).mean()
+                        bb_std = df_hist["Close"].rolling(20).std()
+                        df_hist["BB_Upper"] = df_hist["BB_Middle"] + (2 * bb_std)
+                        df_hist["BB_Lower"] = df_hist["BB_Middle"] - (2 * bb_std)
+                        df_hist["BB_Bandwidth"] = (
+                            (df_hist["BB_Upper"] - df_hist["BB_Lower"]) / df_hist["BB_Middle"].replace(0, np.nan)
+                        )
+                        df_hist["BB_%B"] = (
+                            (df_hist["Close"] - df_hist["BB_Lower"]) /
+                            (df_hist["BB_Upper"] - df_hist["BB_Lower"]).replace(0, np.nan)
+                        )
 
                         if len(df_hist) >= 250:
                             df_hist["MA250"] = df_hist["Close"].rolling(250).mean()
@@ -1290,6 +1955,11 @@ if symbol:
                         all_divergences = scan_all_macd_divergences(df_hist)
                         if all_divergences:
                             div_type = all_divergences[-1]["type"]
+                        rsi_divergences = scan_indicator_divergences(df_hist, "RSI14")
+                        if rsi_divergences:
+                            rsi_div_type = rsi_divergences[-1]["type"]
+                        rsi_value = float(df_hist["RSI14"].iloc[-1])
+                        bollinger_state = summarize_bollinger_state(df_hist)
 
                         vol_ma20 = df_hist["Volume"].rolling(20).mean()
                         curr_vol = df_hist["Volume"].iloc[-1]
@@ -1313,6 +1983,14 @@ if symbol:
                         m55_val = df_hist["MA55"].iloc[-1]
 
                         st.info(f"📊 **當前趨勢評級：{trend_status}**\n\n{trend_desc}")
+                        rsi_status = "超買" if rsi_value > 70 else "超賣" if rsi_value < 30 else "中性"
+                        st.caption(
+                            f"RSI(14): **{rsi_value:.1f} ({rsi_status})** | "
+                            f"Bollinger %B: **{bollinger_state['percent_b']:.2f}** | "
+                            f"BandWidth: **{bollinger_state['bandwidth']:.2%}** | "
+                            f"{'⚡ Squeeze' if bollinger_state['squeeze'] else '波動正常'} | "
+                            f"{bollinger_state['tag']}"
+                        )
 
                         if gunshot_signal:
                             st.success("🔥 **觸發 Livermore 第一槍爆發型態**：今日帶量突破近 20 日高點！")
@@ -1326,6 +2004,14 @@ if symbol:
                                 st.dataframe(div_df, use_container_width=True)
                             else:
                                 st.info("近 2 年區間內未偵測到顯著 MACD 背離點位。")
+
+                        with st.expander("📐 RSI(14) 背離與 Bollinger Band 訊號"):
+                            if rsi_divergences:
+                                rsi_df = pd.DataFrame(rsi_divergences)[["date", "type", "price", "indicator"]].rename(columns={"indicator": "RSI"})
+                                rsi_df["date"] = pd.to_datetime(rsi_df["date"]).dt.strftime("%Y-%m-%d")
+                                st.dataframe(rsi_df, use_container_width=True, hide_index=True)
+                            else:
+                                st.info("近 2 年區間內未偵測到顯著 RSI 背離。")
 
                         # ==========================================
                         # 6. 關鍵支撐/壓力位與黃金分割
@@ -1349,7 +2035,9 @@ if symbol:
             narrative_output = generate_technical_narrative(
                 symbol, curr_price, m10_val, m20_val, m55_val, ma250_val,
                 gunshot_signal, div_type, support_level, resistance_level,
-                fib_618, poc_price, trend_status, trend_desc, ma250_valid=ma250_valid
+                fib_618, poc_price, trend_status, trend_desc, ma250_valid=ma250_valid,
+                rsi_value=rsi_value, rsi_div_type=rsi_div_type,
+                bollinger_state=bollinger_state, macd_divergence=bool(all_divergences)
             )
             st.markdown(narrative_output)
 
@@ -1385,15 +2073,20 @@ if symbol:
             # 9. Interactive Plotly Chart
             # ==========================================
             st.write("---")
-            st.subheader("📈 9. Python 動態圖表 (含 Fibonacci / Standard MA / MACD 背離標記)")
+            st.subheader("📈 9. Python 動態圖表 (含 Fibonacci / Standard MA / MACD / RSI / Bollinger 背離標記)")
 
             if not df_hist.empty and len(df_hist) >= 20:
-                fig_k = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
+                fig_k = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.025, row_heights=[0.58, 0.22, 0.20], subplot_titles=("Price / EMA20 / EMA50", "RSI (14)", "MACD (12,26,9)"))
                 fig_k.add_trace(go.Candlestick(x=df_hist.index, open=df_hist['Open'], high=df_hist['High'], low=df_hist['Low'], close=df_hist['Close'], name="K Line"), row=1, col=1)
+                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["BB_Upper"], name="BB Upper", line=dict(color="#B388FF", width=1)), row=1, col=1)
+                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["BB_Lower"], name="BB Lower", line=dict(color="#B388FF", width=1), fill="tonexty", fillcolor="rgba(179, 136, 255, 0.12)"), row=1, col=1)
+                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["BB_Middle"], name="BB Middle", line=dict(color="#CE93D8", width=1, dash="dot")), row=1, col=1)
                 
                 fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MA10'], name="MA10 (Yellow)", line=dict(color="#FFEB3B", width=1.2)), row=1, col=1)
                 fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MA20'], name="MA20 (Blue)", line=dict(color="#2196F3", width=1.5)), row=1, col=1)
                 fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MA55'], name="MA55 (Green)", line=dict(color="#4CAF50", width=1.8)), row=1, col=1)
+                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["EMA20"], name="EMA20", line=dict(color="#00D4FF", width=1.8)), row=1, col=1)
+                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["EMA50"], name="EMA50", line=dict(color="#FF9F1C", width=1.8)), row=1, col=1)
                 
                 if ma250_valid:
                     fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MA250'], name="MA250 (Red)", line=dict(color="#F44336", width=2.2)), row=1, col=1)
@@ -1411,11 +2104,57 @@ if symbol:
                         row=1, col=1
                     )
 
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MACD'], name="MACD", line=dict(color="blue")), row=2, col=1)
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['Signal'], name="Signal", line=dict(color="orange")), row=2, col=1)
-                fig_k.add_trace(go.Bar(x=df_hist.index, y=df_hist['Hist'], name="Hist", marker_color="gray"), row=2, col=1)
+                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["RSI14"], name="RSI (14)", line=dict(color="#00BFA5", width=2)), row=2, col=1)
+                fig_k.add_hline(y=70, line_dash="dash", line_color="#EF5350", annotation_text="Overbought 70", row=2, col=1)
+                fig_k.add_hline(y=30, line_dash="dash", line_color="#42A5F5", annotation_text="Oversold 30", row=2, col=1)
+                for div in rsi_divergences:
+                    color_tag = "green" if "看多" in div["type"] else "red"
+                    fig_k.add_annotation(x=div["date"], y=div["indicator"], text=" RSI Bull" if "看多" in div["type"] else " RSI Bear", showarrow=True, arrowhead=2, arrowcolor=color_tag, ax=0, ay=-18 if "看多" in div["type"] else 18, row=2, col=1)
 
-                fig_k.update_layout(height=550, xaxis_rangeslider_visible=False, margin=dict(t=20, b=20))
+                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MACD'], name="MACD", line=dict(color="blue")), row=3, col=1)
+                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['Signal'], name="Signal", line=dict(color="orange")), row=3, col=1)
+                fig_k.add_trace(go.Bar(x=df_hist.index, y=df_hist['Hist'], name="Hist", marker_color="gray"), row=3, col=1)
+
+                scanner_signal = st.session_state.get("selected_scanner_signal")
+                if scanner_signal and scanner_signal.get("Ticker") == symbol:
+                    trigger_date = pd.Timestamp(scanner_signal["Trigger Date"])
+                    signal_color = "green" if scanner_signal["Signal Type"] == "Bullish" else "red"
+                    fig_k.add_vline(
+                        x=trigger_date,
+                        line_dash="dash",
+                        line_color=signal_color,
+                        annotation_text=f"{scanner_signal['Signal Type']} trigger",
+                        row=1,
+                        col=1,
+                    )
+                    pivot_dates = [pd.Timestamp(scanner_signal["First Date"]), trigger_date]
+                    fig_k.add_trace(go.Scatter(
+                        x=pivot_dates,
+                        y=[scanner_signal["First Price"], scanner_signal["Second Price"]],
+                        mode="lines+markers",
+                        name="Dual divergence price pivots",
+                        line=dict(color=signal_color, width=3),
+                        marker=dict(size=8),
+                    ), row=1, col=1)
+                    fig_k.add_trace(go.Scatter(
+                        x=pivot_dates,
+                        y=[scanner_signal["First RSI"], scanner_signal["Second RSI"]],
+                        mode="lines+markers",
+                        name="Dual divergence RSI pivots",
+                        line=dict(color=signal_color, width=2),
+                        marker=dict(size=7),
+                    ), row=2, col=1)
+                    fig_k.add_trace(go.Scatter(
+                        x=pivot_dates,
+                        y=[scanner_signal["First MACD"], scanner_signal["Second MACD"]],
+                        mode="lines+markers",
+                        name="Dual divergence MACD pivots",
+                        line=dict(color=signal_color, width=2),
+                        marker=dict(size=7),
+                    ), row=3, col=1)
+
+                fig_k.update_yaxes(range=[0, 100], row=2, col=1)
+                fig_k.update_layout(height=760, xaxis_rangeslider_visible=False, margin=dict(t=35, b=20))
                 st.plotly_chart(fig_k, use_container_width=True)
 
             # ==========================================
@@ -1485,6 +2224,53 @@ if symbol:
             </div>
             """
             components.html(tv_html, height=560)
+
+            # ==========================================
+            # 11. 選擇權深度分析與大單異常籌碼掃描 (Options Analysis & Unusual Options Flow)
+            # ==========================================
+            st.write("---")
+            st.subheader("11. 選擇權深度分析與大單異常籌碼掃描 (Options Analysis & Unusual Options Flow)")
+            options_summary = fetch_options_analysis(symbol, curr_price)
+            if not options_summary.get("available"):
+                st.info(
+                    f"ℹ️ {options_summary.get('message', '此標的沒有可用的選擇權市場資料。')} "
+                    "非美股（例如 .TW、.HK）通常不提供 yfinance 可讀取的選擇權鏈；其餘股票分析不受影響。"
+                )
+            else:
+                pcr_volume = options_summary.get("pcr_volume", np.nan)
+                pcr_oi = options_summary.get("pcr_oi", np.nan)
+                iv_summary = options_summary.get("iv_summary", {})
+                overview_1, overview_2, overview_3, overview_4 = st.columns(4)
+                overview_1.metric("Put/Call Ratio (Volume)", f"{pcr_volume:.2f}" if pd.notna(pcr_volume) else "N/A")
+                overview_2.metric("Put/Call Ratio (OI)", f"{pcr_oi:.2f}" if pd.notna(pcr_oi) else "N/A")
+                overview_3.metric("Max Pain Price", f"${options_summary['max_pain']:.2f}" if pd.notna(options_summary.get("max_pain")) else "N/A")
+                overview_4.metric("NTM Put IV - Call IV", f"{iv_summary.get('Put-Call IV Skew', np.nan) * 100:.2f}%" if pd.notna(iv_summary.get("Put-Call IV Skew")) else "N/A")
+
+                st.caption(
+                    f"掃描到期日：{', '.join(options_summary['expirations'])} | "
+                    f"NTM Call IV: {iv_summary.get('Call IV', np.nan) * 100:.2f}% | "
+                    f"NTM Put IV: {iv_summary.get('Put IV', np.nan) * 100:.2f}%"
+                    if pd.notna(iv_summary.get("Call IV")) and pd.notna(iv_summary.get("Put IV"))
+                    else f"掃描到期日：{', '.join(options_summary['expirations'])} | NTM IV 資料不足"
+                )
+
+                st.markdown("##### 🔎 Smart Money Unusual Flow（Volume > 2.5 × OI 且 Volume > 1,000）")
+                unusual_flow = options_summary.get("unusual", pd.DataFrame()).copy()
+                if unusual_flow.empty:
+                    st.info("近 45 天到期選擇權中沒有符合異常大單條件的合約。")
+                else:
+                    unusual_flow["Implied Volatility"] = unusual_flow["Implied Volatility"] * 100
+                    unusual_flow["Vol/OI Ratio"] = unusual_flow["Vol/OI Ratio"].replace(np.inf, np.nan)
+                    st.dataframe(
+                        unusual_flow.style.format({
+                            "Strike Price": "${:.2f}", "Volume": "{:.0f}", "Open Interest": "{:.0f}",
+                            "Vol/OI Ratio": "{:.2f}x", "Implied Volatility": "{:.2f}%",
+                            "Estimated Trade Value": "${:,.0f}",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                st.info(f"🤖 **AI Flow Interpretation**：{interpret_options_flow(options_summary)}")
 
     except Exception as e:
         st.error(f"分析時發生未預期錯誤: {e}")
