@@ -382,7 +382,7 @@ def fetch_ticker_data(symbol_str):
     yf_symbol = to_yfinance_symbol(symbol_str)
     t = yf.Ticker(yf_symbol)
 
-    # 1. 使用最穩定的 yf.download 獲取價格 K 線
+    # 1. 抓取價格 K 線
     try:
         hist = yf.download(yf_symbol, period="2y", progress=False)
         if isinstance(hist.columns, pd.MultiIndex):
@@ -392,7 +392,7 @@ def fetch_ticker_data(symbol_str):
 
     current_p = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
 
-    # 2. 基礎 fast_info 汲取
+    # 2. 獲取 fast_info 並推算流通股數 (sharesOutstanding)
     info = {
         "shortName": symbol_str,
         "currentPrice": current_p,
@@ -400,6 +400,7 @@ def fetch_ticker_data(symbol_str):
         "fiftyTwoWeekLow": current_p * 0.7,
         "fiftyTwoWeekHigh": current_p * 1.2,
         "marketCap": 0.0,
+        "sharesOutstanding": 0.0,
     }
 
     try:
@@ -409,6 +410,12 @@ def fetch_ticker_data(symbol_str):
         info["fiftyTwoWeekLow"] = float(getattr(fast_inf, "year_low", current_p) or current_p)
         info["fiftyTwoWeekHigh"] = float(getattr(fast_inf, "year_high", current_p) or current_p)
         info["marketCap"] = float(getattr(fast_inf, "market_cap", 0) or 0)
+        
+        # 【關鍵修復 1】：當 t.info 遭封鎖時，由市值/當前股價推算流通股數，供 DCF 模型使用
+        shares = getattr(fast_inf, "shares", 0) or getattr(fast_inf, "shares_outstanding", 0)
+        if not shares and info["marketCap"] > 0 and info["currentPrice"] > 0:
+            shares = info["marketCap"] / info["currentPrice"]
+        info["sharesOutstanding"] = float(shares or 0)
     except Exception:
         pass
 
@@ -419,6 +426,25 @@ def fetch_ticker_data(symbol_str):
             info.update(full_info)
     except Exception:
         pass
+
+    # 【關鍵修復 2】：熱門標的產業類別備援 (避免同業基準顯示為 General)
+    TICKER_DEFAULTS = {
+        "NVDA": {"industry": "Semiconductors", "sector": "Technology"},
+        "AAPL": {"industry": "Consumer Electronics", "sector": "Technology"},
+        "TSLA": {"industry": "Auto Manufacturers", "sector": "Consumer Cyclical"},
+        "MSFT": {"industry": "Software - Infrastructure", "sector": "Technology"},
+        "AMZN": {"industry": "Internet Retail", "sector": "Consumer Cyclical"},
+        "GOOG": {"industry": "Internet Content & Information", "sector": "Communication Services"},
+        "GOOGL": {"industry": "Internet Content & Information", "sector": "Communication Services"},
+        "META": {"industry": "Internet Content & Information", "sector": "Communication Services"},
+        "AMD": {"industry": "Semiconductors", "sector": "Technology"},
+        "TSM": {"industry": "Semiconductors", "sector": "Technology"},
+        "AVGO": {"industry": "Semiconductors", "sector": "Technology"},
+    }
+    clean_sym = symbol_str.replace(".US", "").upper()
+    if not info.get("industry") and clean_sym in TICKER_DEFAULTS:
+        info["industry"] = TICKER_DEFAULTS[clean_sym]["industry"]
+        info["sector"] = TICKER_DEFAULTS[clean_sym]["sector"]
 
     # 4. 讀取財務報表
     def quick_get_df(attr_name):
@@ -435,8 +461,9 @@ def fetch_ticker_data(symbol_str):
     q_bs = quick_get_df("quarterly_balance_sheet")
     q_cf = quick_get_df("quarterly_cashflow")
 
-    # 5. 從報表計算補充比率
+    # 5. 從財務報表動態計算比率 (P/S, P/B, Quick Ratio, Margins, ROE, ROA)
     mkt_cap = info.get("marketCap", 0)
+    
     if not fin.empty:
         try:
             latest_fin = fin.iloc[:, 0]
@@ -451,6 +478,7 @@ def fetch_ticker_data(symbol_str):
                 if not info.get("profitMargins"): info["profitMargins"] = net_income / revenue
                 if not info.get("priceToSalesTrailing12Months") and mkt_cap > 0:
                     info["priceToSalesTrailing12Months"] = mkt_cap / revenue
+
             if not info.get("trailingPE") and net_income > 0 and mkt_cap > 0:
                 info["trailingPE"] = mkt_cap / net_income
         except Exception:
@@ -461,16 +489,25 @@ def fetch_ticker_data(symbol_str):
             latest_bs = bs.iloc[:, 0]
             equity = float(latest_bs.get("Stockholders Equity", 0) or latest_bs.get("Total Equity Gross Minority Interest", 0) or 0)
             assets = float(latest_bs.get("Total Assets", 0) or 0)
+            curr_assets = float(latest_bs.get("Current Assets", 0) or 0)
+            inventory = float(latest_bs.get("Current Inventory", latest_bs.get("Inventory", 0)) or 0)
+            curr_liab = float(latest_bs.get("Current Liabilities", 0) or 0)
+
             if not info.get("priceToBook") and equity > 0 and mkt_cap > 0:
                 info["priceToBook"] = mkt_cap / equity
-            if not fin.empty:
+
+            # 【關鍵修復 3】：計算 Quick Ratio
+            if not info.get("quickRatio") and curr_liab > 0:
+                info["quickRatio"] = (curr_assets - inventory) / curr_liab
+
+            if not fin.empty and revenue > 0:
                 net_income = float(fin.iloc[:, 0].get("Net Income", 0) or 0)
                 if not info.get("returnOnEquity") and equity > 0: info["returnOnEquity"] = net_income / equity
                 if not info.get("returnOnAssets") and assets > 0: info["returnOnAssets"] = net_income / assets
         except Exception:
             pass
 
-    # 6. 【防護網】：若 Yahoo 徹底封鎖 AWS IP 導致欄位缺失，自動賦予合理備援數值 (避開全 N/A)
+    # 6. 保底防護網 (避免全部顯示 N/A)
     default_fallbacks = {
         "grossMargins": 0.65 if "NVDA" in symbol_str.upper() else 0.40,
         "operatingMargins": 0.55 if "NVDA" in symbol_str.upper() else 0.20,
