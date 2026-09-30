@@ -352,7 +352,7 @@ def get_cnn_fear_and_greed():
     except Exception:
         return None, "CNN unavailable"
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def get_risk_free_rate():
     """Fetches real-time 10-Year US Treasury Yield (^TNX) as Risk-Free Rate"""
     try:
@@ -365,12 +365,12 @@ def get_risk_free_rate():
     return 0.042
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def get_vix_value():
     history = yf.Ticker("^VIX").history(period="5d")
     return float(history["Close"].iloc[-1]) if not history.empty else 20.0
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def fetch_ticker_data(symbol_str):
     t = yf.Ticker(to_yfinance_symbol(symbol_str))
     info = t.info or {}
@@ -384,7 +384,7 @@ def fetch_ticker_data(symbol_str):
     return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def fetch_scanner_history(symbol_str):
     return yf.Ticker(to_yfinance_symbol(symbol_str)).history(period="6mo", interval="1d")
 
@@ -924,7 +924,7 @@ def summarize_bollinger_state(df):
     return {"squeeze": squeeze, "tag": tag, "percent_b": float(latest["BB_%B"]), "bandwidth": float(latest["BB_Bandwidth"])}
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def fetch_options_analysis(symbol_str, current_price):
     """Fetch near-term option chains and summarize PCR, IV, max pain, and UOA."""
     try:
@@ -1136,7 +1136,6 @@ if app_view == "Scanner Dashboard":
     for ticker_index, ticker_symbol in enumerate(st.session_state.watchlist, start=1):
         try:
             ticker_history = fetch_scanner_history(ticker_symbol)
-            time.sleep(0.3)
             for signal in find_dual_divergences(ticker_history):
                 scan_rows.append({"Ticker": ticker_symbol, **signal})
         except Exception as error:
