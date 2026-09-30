@@ -377,36 +377,129 @@ def get_vix_value():
     history = yf.Ticker("^VIX").history(period="5d")
     return float(history["Close"].iloc[-1]) if not history.empty else 20.0
 
-@st.cache_data(ttl=3600)  # Extended cache to 1 hour to reduce Yahoo API calls
+@st.cache_data(ttl=3600)
 def fetch_ticker_data(symbol_str):
     yf_symbol = to_yfinance_symbol(symbol_str)
     t = yf.Ticker(yf_symbol)
-    
-    # Helper to fetch each statement with automatic rate-limit cooldown
-    def safe_fetch(get_fn, default_val):
-        for attempt in range(3):
-            try:
-                res = get_fn()
-                if res is not None and not (isinstance(res, pd.DataFrame) and res.empty):
-                    return res
-                # Slight pause between consecutive properties
-                time.sleep(0.2)
-            except Exception as e:
-                if "429" in str(e) or "Too Many" in str(e):
-                    time.sleep(1.5 * (attempt + 1))  # Exponential backoff on rate limit
-                else:
-                    break
-        return default_val if default_val is not None else pd.DataFrame()
 
-    # Retrieve all 8 properties with pacing to prevent 429 rate limits
-    info = safe_fetch(lambda: t.info or {}, {})
-    hist = safe_fetch(lambda: t.history(period="2y"), pd.DataFrame())
-    bs = safe_fetch(lambda: t.balance_sheet, pd.DataFrame())
-    fin = safe_fetch(lambda: t.financials, pd.DataFrame())
-    cf = safe_fetch(lambda: t.cashflow, pd.DataFrame())
-    q_fin = safe_fetch(lambda: t.quarterly_financials, pd.DataFrame())
-    q_bs = safe_fetch(lambda: t.quarterly_balance_sheet, pd.DataFrame())
-    q_cf = safe_fetch(lambda: t.quarterly_cashflow, pd.DataFrame())
+    # 1. Fetch price history
+    try:
+        hist = t.history(period="2y")
+    except Exception:
+        hist = pd.DataFrame()
+
+    # 2. Safely retrieve financial statements
+    def safe_get(attr_name):
+        try:
+            val = getattr(t, attr_name)
+            return val if isinstance(val, pd.DataFrame) and not val.empty else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+    bs = safe_get("balance_sheet")
+    fin = safe_get("financials")
+    cf = safe_get("cashflow")
+    q_fin = safe_get("quarterly_financials")
+    q_bs = safe_get("quarterly_balance_sheet")
+    q_cf = safe_get("quarterly_cashflow")
+
+    # 3. Attempt to fetch primary info dictionary
+    info = {}
+    try:
+        fetched_info = t.info
+        if isinstance(fetched_info, dict) and len(fetched_info) > 5:
+            info = fetched_info.copy()
+    except Exception:
+        info = {}
+
+    # 4. Fill price, market cap, and shares from fast_info if t.info was blocked
+    curr_price = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
+    try:
+        fast_inf = t.fast_info
+        if not info.get("currentPrice"):
+            info["currentPrice"] = float(getattr(fast_inf, "last_price", curr_price) or curr_price)
+        if not info.get("previousClose"):
+            info["previousClose"] = float(getattr(fast_inf, "previous_close", curr_price) or curr_price)
+        if not info.get("fiftyTwoWeekLow"):
+            info["fiftyTwoWeekLow"] = float(getattr(fast_inf, "year_low", curr_price) or curr_price)
+        if not info.get("fiftyTwoWeekHigh"):
+            info["fiftyTwoWeekHigh"] = float(getattr(fast_inf, "year_high", curr_price) or curr_price)
+        if not info.get("marketCap"):
+            info["marketCap"] = float(getattr(fast_inf, "market_cap", 0) or 0)
+        if not info.get("sharesOutstanding"):
+            shares = getattr(fast_inf, "shares", 0)
+            if not shares and info.get("marketCap") and info.get("currentPrice"):
+                shares = info["marketCap"] / info["currentPrice"]
+            info["sharesOutstanding"] = float(shares or 0)
+    except Exception:
+        pass
+
+    if not info.get("shortName"):
+        info["shortName"] = symbol_str
+
+    # 5. Compute missing financial ratios directly from Income Statement & Balance Sheet
+    mkt_cap = info.get("marketCap", 0)
+
+    if not fin.empty:
+        try:
+            latest_fin = fin.iloc[:, 0]
+
+            def get_row(df_col, possible_names):
+                for name in possible_names:
+                    if name in df_col.index and pd.notna(df_col[name]):
+                        return float(df_col[name])
+                return 0.0
+
+            revenue = get_row(latest_fin, ["Total Revenue", "Operating Revenue"])
+            gross_profit = get_row(latest_fin, ["Gross Profit"])
+            op_income = get_row(latest_fin, ["Operating Income"])
+            net_income = get_row(latest_fin, ["Net Income", "Net Income Common Stockholders"])
+
+            if revenue > 0:
+                if not info.get("grossMargins") and gross_profit > 0:
+                    info["grossMargins"] = gross_profit / revenue
+                if not info.get("operatingMargins") and op_income != 0:
+                    info["operatingMargins"] = op_income / revenue
+                if not info.get("profitMargins") and net_income != 0:
+                    info["profitMargins"] = net_income / revenue
+                if not info.get("priceToSalesTrailing12Months") and mkt_cap > 0:
+                    info["priceToSalesTrailing12Months"] = mkt_cap / revenue
+
+            if not info.get("trailingPE") and net_income > 0 and mkt_cap > 0:
+                info["trailingPE"] = mkt_cap / net_income
+        except Exception:
+            pass
+
+    if not bs.empty:
+        try:
+            latest_bs = bs.iloc[:, 0]
+
+            def get_row_bs(df_col, possible_names):
+                for name in possible_names:
+                    if name in df_col.index and pd.notna(df_col[name]):
+                        return float(df_col[name])
+                return 0.0
+
+            equity = get_row_bs(latest_bs, ["Stockholders Equity", "Total Equity Gross Minority Interest", "Total Stockholder Equity"])
+            assets = get_row_bs(latest_bs, ["Total Assets"])
+            curr_assets = get_row_bs(latest_bs, ["Current Assets"])
+            curr_liab = get_row_bs(latest_bs, ["Current Liabilities"])
+            inventory = get_row_bs(latest_bs, ["Current Inventory", "Inventory"])
+
+            if not info.get("priceToBook") and equity > 0 and mkt_cap > 0:
+                info["priceToBook"] = mkt_cap / equity
+
+            if not info.get("quickRatio") and curr_liab > 0:
+                info["quickRatio"] = (curr_assets - inventory) / curr_liab
+
+            if not fin.empty and revenue > 0:
+                net_income = get_row(fin.iloc[:, 0], ["Net Income", "Net Income Common Stockholders"])
+                if not info.get("returnOnEquity") and equity > 0 and net_income != 0:
+                    info["returnOnEquity"] = net_income / equity
+                if not info.get("returnOnAssets") and assets > 0 and net_income != 0:
+                    info["returnOnAssets"] = net_income / assets
+        except Exception:
+            pass
 
     return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
     
