@@ -11,11 +11,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
 
-# ========================================== #
-#  Yahoo Finance Anti-429 Session Helper     #
-# ========================================== #
-
-    
 # Page Configuration
 st.set_page_config(
     page_title="Pro Stock Analysis & Watchlist Platform", page_icon="⚡", layout="wide"
@@ -266,10 +261,13 @@ def load_watchlist():
     try:
         saved = json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
         if isinstance(saved, list):
-            symbols = list(dict.fromkeys(
-                value.strip().upper() for value in saved
-                if isinstance(value, str) and value.strip()
-            ))
+            symbols = list(
+                dict.fromkeys(
+                    value.strip().upper()
+                    for value in saved
+                    if isinstance(value, str) and value.strip()
+                )
+            )
             return symbols
     except (OSError, json.JSONDecodeError):
         pass
@@ -288,7 +286,9 @@ if st.session_state.get("watchlist_revision") != WATCHLIST_REVISION:
 
 st.sidebar.title("⭐ Watchlist Manager")
 with st.sidebar.form("watchlist_add_form"):
-    new_symbol = st.text_input("Stock ticker", key="new_watchlist_symbol").strip().upper()
+    new_symbol = (
+        st.text_input("Stock ticker", key="new_watchlist_symbol").strip().upper()
+    )
     add_symbol = st.form_submit_button("Add ticker", use_container_width=True)
 if add_symbol and new_symbol and new_symbol not in st.session_state.watchlist:
     st.session_state.watchlist.append(new_symbol)
@@ -306,7 +306,11 @@ with st.sidebar.expander(f"Saved tickers ({len(st.session_state.watchlist)})"):
         ticker_to_remove = st.selectbox(
             "Ticker to remove", st.session_state.watchlist, key="ticker_to_remove"
         )
-        if st.button("Remove selected ticker", key="remove_selected_ticker", use_container_width=True):
+        if st.button(
+            "Remove selected ticker",
+            key="remove_selected_ticker",
+            use_container_width=True,
+        ):
             st.session_state.watchlist.remove(ticker_to_remove)
             save_watchlist(st.session_state.watchlist)
             st.rerun()
@@ -315,8 +319,10 @@ with st.sidebar.expander(f"Saved tickers ({len(st.session_state.watchlist)})"):
 
 st.sidebar.caption("Only saved tickers are scanned.")
 app_view = st.radio(
-    "Workspace", ["Scanner Dashboard", "Stock Analysis"],
-    horizontal=True, key="app_view",
+    "Workspace",
+    ["Scanner Dashboard", "Stock Analysis"],
+    horizontal=True,
+    key="app_view",
 )
 selected_from_watchlist = "-- Select --"
 if app_view == "Stock Analysis":
@@ -326,14 +332,23 @@ if app_view == "Stock Analysis":
     )
     col_search, _ = st.columns([1, 2])
     with col_search:
-        manual_symbol = st.text_input(
-            "輸入股票代碼 (例: NVDA, AAPL, TSLA, 2330.TW):",
-            value=st.session_state.get("analysis_symbol", "NVDA"),
-            key="manual_symbol_input",
-        ).strip().upper()
-    symbol = selected_from_watchlist if selected_from_watchlist != "-- Select --" else manual_symbol
+        manual_symbol = (
+            st.text_input(
+                "輸入股票代碼 (例: NVDA, AAPL, TSLA, 2330.TW):",
+                value=st.session_state.get("analysis_symbol", "NVDA"),
+                key="manual_symbol_input",
+            )
+            .strip()
+            .upper()
+        )
+    symbol = (
+        selected_from_watchlist
+        if selected_from_watchlist != "-- Select --"
+        else manual_symbol
+    )
 else:
     symbol = st.session_state.get("analysis_symbol", "")
+
 
 # ==========================================
 # Caching & Helper Functions
@@ -346,7 +361,10 @@ def get_cnn_fear_and_greed():
         req = urllib.request.Request(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                    " Chrome/140.0 Safari/537.36"
+                ),
                 "Origin": "https://www.cnn.com",
                 "Referer": "https://www.cnn.com/markets/fear-and-greed",
             },
@@ -358,6 +376,7 @@ def get_cnn_fear_and_greed():
             return score, rating
     except Exception:
         return None, "CNN unavailable"
+
 
 @st.cache_data(ttl=300)
 def get_risk_free_rate():
@@ -377,6 +396,7 @@ def get_vix_value():
     history = yf.Ticker("^VIX").history(period="5d")
     return float(history["Close"].iloc[-1]) if not history.empty else 20.0
 
+
 @st.cache_data(ttl=3600)
 def fetch_ticker_data(symbol_str):
     yf_symbol = to_yfinance_symbol(symbol_str)
@@ -392,7 +412,11 @@ def fetch_ticker_data(symbol_str):
     def safe_get(attr_name):
         try:
             val = getattr(t, attr_name)
-            return val if isinstance(val, pd.DataFrame) and not val.empty else pd.DataFrame()
+            return (
+                val
+                if isinstance(val, pd.DataFrame) and not val.empty
+                else pd.DataFrame()
+            )
         except Exception:
             return pd.DataFrame()
 
@@ -403,7 +427,7 @@ def fetch_ticker_data(symbol_str):
     q_bs = safe_get("quarterly_balance_sheet")
     q_cf = safe_get("quarterly_cashflow")
 
-    # 3. Attempt to fetch primary info dictionary with quick retry
+    # 3. Fetch primary info dictionary with retry
     info = {}
     for _ in range(2):
         try:
@@ -419,13 +443,21 @@ def fetch_ticker_data(symbol_str):
     try:
         fast_inf = t.fast_info
         if not info.get("currentPrice"):
-            info["currentPrice"] = float(getattr(fast_inf, "last_price", curr_price) or curr_price)
+            info["currentPrice"] = float(
+                getattr(fast_inf, "last_price", curr_price) or curr_price
+            )
         if not info.get("previousClose"):
-            info["previousClose"] = float(getattr(fast_inf, "previous_close", curr_price) or curr_price)
+            info["previousClose"] = float(
+                getattr(fast_inf, "previous_close", curr_price) or curr_price
+            )
         if not info.get("fiftyTwoWeekLow"):
-            info["fiftyTwoWeekLow"] = float(getattr(fast_inf, "year_low", curr_price) or curr_price)
+            info["fiftyTwoWeekLow"] = float(
+                getattr(fast_inf, "year_low", curr_price) or curr_price
+            )
         if not info.get("fiftyTwoWeekHigh"):
-            info["fiftyTwoWeekHigh"] = float(getattr(fast_inf, "year_high", curr_price) or curr_price)
+            info["fiftyTwoWeekHigh"] = float(
+                getattr(fast_inf, "year_high", curr_price) or curr_price
+            )
         if not info.get("marketCap"):
             info["marketCap"] = float(getattr(fast_inf, "market_cap", 0) or 0)
         if not info.get("sharesOutstanding"):
@@ -439,7 +471,42 @@ def fetch_ticker_data(symbol_str):
     if not info.get("shortName"):
         info["shortName"] = symbol_str
 
-    # 5. Compute missing financial ratios directly from Income Statement & Balance Sheet
+    # 5. Ticker Metadata Fallback for Industry Classification when t.info is blocked
+    TICKER_DEFAULTS = {
+        "NVDA": {"industry": "Semiconductors", "sector": "Technology"},
+        "AAPL": {"industry": "Consumer Electronics", "sector": "Technology"},
+        "TSLA": {"industry": "Auto Manufacturers", "sector": "Consumer Cyclical"},
+        "MSFT": {"industry": "Software - Infrastructure", "sector": "Technology"},
+        "AMZN": {"industry": "Internet Retail", "sector": "Consumer Cyclical"},
+        "GOOG": {
+            "industry": "Internet Content & Information",
+            "sector": "Communication Services",
+        },
+        "GOOGL": {
+            "industry": "Internet Content & Information",
+            "sector": "Communication Services",
+        },
+        "META": {
+            "industry": "Internet Content & Information",
+            "sector": "Communication Services",
+        },
+        "AMD": {"industry": "Semiconductors", "sector": "Technology"},
+        "TSM": {"industry": "Semiconductors", "sector": "Technology"},
+        "AVGO": {"industry": "Semiconductors", "sector": "Technology"},
+        "INTC": {"industry": "Semiconductors", "sector": "Technology"},
+        "QCOM": {"industry": "Semiconductors", "sector": "Technology"},
+        "MU": {"industry": "Semiconductors", "sector": "Technology"},
+        "ARM": {"industry": "Semiconductors", "sector": "Technology"},
+        "SMCI": {"industry": "Computer Hardware", "sector": "Technology"},
+        "DELL": {"industry": "Computer Hardware", "sector": "Technology"},
+        "PLTR": {"industry": "Software - Infrastructure", "sector": "Technology"},
+    }
+    clean_sym = symbol_str.replace(".US", "").upper()
+    if not info.get("industry") and clean_sym in TICKER_DEFAULTS:
+        info["industry"] = TICKER_DEFAULTS[clean_sym]["industry"]
+        info["sector"] = TICKER_DEFAULTS[clean_sym]["sector"]
+
+    # 6. Compute missing financial ratios directly from Income Statement & Balance Sheet
     mkt_cap = info.get("marketCap", 0)
 
     if not fin.empty:
@@ -455,7 +522,9 @@ def fetch_ticker_data(symbol_str):
             revenue = get_row(latest_fin, ["Total Revenue", "Operating Revenue"])
             gross_profit = get_row(latest_fin, ["Gross Profit"])
             op_income = get_row(latest_fin, ["Operating Income"])
-            net_income = get_row(latest_fin, ["Net Income", "Net Income Common Stockholders"])
+            net_income = get_row(
+                latest_fin, ["Net Income", "Net Income Common Stockholders"]
+            )
 
             if revenue > 0:
                 if not info.get("grossMargins") and gross_profit > 0:
@@ -469,6 +538,14 @@ def fetch_ticker_data(symbol_str):
 
             if not info.get("trailingPE") and net_income > 0 and mkt_cap > 0:
                 info["trailingPE"] = mkt_cap / net_income
+
+            # Calculate YoY earnings growth for PEG Ratio if missing
+            if fin.shape[1] >= 2 and not info.get("earningsGrowth"):
+                prev_net_inc = get_row(
+                    fin.iloc[:, 1], ["Net Income", "Net Income Common Stockholders"]
+                )
+                if prev_net_inc > 0 and net_income != 0:
+                    info["earningsGrowth"] = (net_income - prev_net_inc) / prev_net_inc
         except Exception:
             pass
 
@@ -482,11 +559,20 @@ def fetch_ticker_data(symbol_str):
                         return float(df_col[name])
                 return 0.0
 
-            equity = get_row_bs(latest_bs, ["Stockholders Equity", "Total Equity Gross Minority Interest", "Total Stockholder Equity"])
+            equity = get_row_bs(
+                latest_bs,
+                [
+                    "Stockholders Equity",
+                    "Total Equity Gross Minority Interest",
+                    "Total Stockholder Equity",
+                ],
+            )
             assets = get_row_bs(latest_bs, ["Total Assets"])
             curr_assets = get_row_bs(latest_bs, ["Current Assets"])
             curr_liab = get_row_bs(latest_bs, ["Current Liabilities"])
-            inventory = get_row_bs(latest_bs, ["Current Inventory", "Inventory"])
+            inventory = get_row_bs(
+                latest_bs, ["Current Inventory", "Inventory"]
+            )
 
             if not info.get("priceToBook") and equity > 0 and mkt_cap > 0:
                 info["priceToBook"] = mkt_cap / equity
@@ -495,7 +581,9 @@ def fetch_ticker_data(symbol_str):
                 info["quickRatio"] = (curr_assets - inventory) / curr_liab
 
             if not fin.empty and revenue > 0:
-                net_inc_val = get_row(fin.iloc[:, 0], ["Net Income", "Net Income Common Stockholders"])
+                net_inc_val = get_row(
+                    fin.iloc[:, 0], ["Net Income", "Net Income Common Stockholders"]
+                )
                 if not info.get("returnOnEquity") and equity > 0 and net_inc_val != 0:
                     info["returnOnEquity"] = net_inc_val / equity
                 if not info.get("returnOnAssets") and assets > 0 and net_inc_val != 0:
@@ -503,17 +591,20 @@ def fetch_ticker_data(symbol_str):
         except Exception:
             pass
 
-    # 6. Derive PEG Ratio if missing using calculated P/E and earnings growth
+    # 7. Compute PEG Ratio dynamically using P/E and calculated earnings growth
     if not info.get("pegRatio") and info.get("trailingPE"):
         earnings_g = info.get("earningsGrowth")
         if isinstance(earnings_g, (int, float)) and earnings_g > 0:
             info["pegRatio"] = info["trailingPE"] / (earnings_g * 100)
 
     return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
-    
+
+
 @st.cache_data(ttl=300)
 def fetch_scanner_history(symbol_str):
-    return yf.Ticker(to_yfinance_symbol(symbol_str)).history(period="6mo", interval="1d")
+    return yf.Ticker(to_yfinance_symbol(symbol_str)).history(
+        period="6mo", interval="1d"
+    )
 
 
 def find_dual_divergences(history, lookback_days=90, window=3):
@@ -524,7 +615,10 @@ def find_dual_divergences(history, lookback_days=90, window=3):
 
     data = history.copy().dropna(subset=["High", "Low", "Close"]).sort_index()
     data["RSI"] = calculate_rsi(data["Close"], 14)
-    data["MACD"] = data["Close"].ewm(span=12, adjust=False).mean() - data["Close"].ewm(span=26, adjust=False).mean()
+    data["MACD"] = (
+        data["Close"].ewm(span=12, adjust=False).mean()
+        - data["Close"].ewm(span=26, adjust=False).mean()
+    )
     cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=lookback_days)
     if getattr(data.index, "tz", None) is not None:
         cutoff = cutoff.tz_localize(data.index.tz)
@@ -537,14 +631,32 @@ def find_dual_divergences(history, lookback_days=90, window=3):
         if date < cutoff:
             continue
         row = data.iloc[index]
-        if all(prices_low[index] <= prices_low[index - offset] for offset in range(1, window + 1)) and all(
-            prices_low[index] <= prices_low[index + offset] for offset in range(1, window + 1)
+        if all(
+            prices_low[index] <= prices_low[index - offset]
+            for offset in range(1, window + 1)
+        ) and all(
+            prices_low[index] <= prices_low[index + offset]
+            for offset in range(1, window + 1)
         ):
-            lows.append((index, date, prices_low[index], float(row["RSI"]), float(row["MACD"])))
-        if all(prices_high[index] >= prices_high[index - offset] for offset in range(1, window + 1)) and all(
-            prices_high[index] >= prices_high[index + offset] for offset in range(1, window + 1)
+            lows.append(
+                (index, date, prices_low[index], float(row["RSI"]), float(row["MACD"]))
+            )
+        if all(
+            prices_high[index] >= prices_high[index - offset]
+            for offset in range(1, window + 1)
+        ) and all(
+            prices_high[index] >= prices_high[index + offset]
+            for offset in range(1, window + 1)
         ):
-            highs.append((index, date, prices_high[index], float(row["RSI"]), float(row["MACD"])))
+            highs.append(
+                (
+                    index,
+                    date,
+                    prices_high[index],
+                    float(row["RSI"]),
+                    float(row["MACD"]),
+                )
+            )
 
     signals = []
     for pivots, bullish in ((lows, True), (highs, False)):
@@ -552,7 +664,11 @@ def find_dual_divergences(history, lookback_days=90, window=3):
             index_1, date_1, price_1, rsi_1, macd_1 = first
             index_2, date_2, price_2, rsi_2, macd_2 = second
             price_condition = price_2 < price_1 if bullish else price_2 > price_1
-            indicators_condition = (rsi_2 > rsi_1 and macd_2 > macd_1) if bullish else (rsi_2 < rsi_1 and macd_2 < macd_1)
+            indicators_condition = (
+                (rsi_2 > rsi_1 and macd_2 > macd_1)
+                if bullish
+                else (rsi_2 < rsi_1 and macd_2 < macd_1)
+            )
             if price_condition and indicators_condition:
                 trigger_close = float(data["Close"].iloc[index_2])
                 latest_price = float(data["Close"].iloc[-1])
@@ -564,7 +680,9 @@ def find_dual_divergences(history, lookback_days=90, window=3):
                     "Trigger Close": trigger_close,
                     "Latest Price": latest_price,
                     "Change ($)": price_change,
-                    "Change (%)": (price_change / trigger_close * 100) if trigger_close else np.nan,
+                    "Change (%)": (
+                        (price_change / trigger_close * 100) if trigger_close else np.nan
+                    ),
                     "RSI": rsi_2,
                     "MACD": macd_2,
                     "First Date": date_1,
@@ -576,6 +694,7 @@ def find_dual_divergences(history, lookback_days=90, window=3):
                     "Second MACD": macd_2,
                 })
     return sorted(signals, key=lambda signal: signal["Trigger Date"])
+
 
 def map_symbol_for_tradingview(symbol_input):
     sym = to_yfinance_symbol(symbol_input)
@@ -596,30 +715,105 @@ def map_symbol_for_tradingview(symbol_input):
         return f"TSE:{code}"
     return sym.replace(".", "")
 
+
 def get_granular_industry_benchmarks(industry_str, sector_str):
     ind = (industry_str or "").lower()
     sec = (sector_str or "").lower()
 
     if "semicon" in ind:
-        return "Semiconductors & AI Chips (半導體與AI晶片)", {"PE": 35.0, "PS": 10.0, "PEG": 1.4, "GM": 62.0, "NM": 28.0, "ROE": 25.0}
+        return "Semiconductors & AI Chips (半導體與AI晶片)", {
+            "PE": 35.0,
+            "PS": 10.0,
+            "PEG": 1.4,
+            "GM": 62.0,
+            "NM": 28.0,
+            "ROE": 25.0,
+        }
     elif "software" in ind or "cloud" in ind or "infrastructure" in ind:
-        return "Software & Enterprise Cloud (軟體與雲端 SaaS)", {"PE": 38.0, "PS": 9.0, "PEG": 1.6, "GM": 72.0, "NM": 22.0, "ROE": 20.0}
+        return "Software & Enterprise Cloud (軟體與雲端 SaaS)", {
+            "PE": 38.0,
+            "PS": 9.0,
+            "PEG": 1.6,
+            "GM": 72.0,
+            "NM": 22.0,
+            "ROE": 20.0,
+        }
     elif "consumer electronics" in ind or "hardware" in ind:
-        return "Consumer Electronics (消費電子/硬體裝置)", {"PE": 28.0, "PS": 6.5, "PEG": 1.8, "GM": 44.0, "NM": 24.0, "ROE": 30.0}
-    elif "internet content" in ind or "interactive media" in ind or "social media" in ind:
-        return "Digital Media & Ad Tech (數位媒體與廣告科技)", {"PE": 25.0, "PS": 7.0, "PEG": 1.3, "GM": 78.0, "NM": 26.0, "ROE": 22.0}
+        return "Consumer Electronics (消費電子/硬體裝置)", {
+            "PE": 28.0,
+            "PS": 6.5,
+            "PEG": 1.8,
+            "GM": 44.0,
+            "NM": 24.0,
+            "ROE": 30.0,
+        }
+    elif (
+        "internet content" in ind
+        or "interactive media" in ind
+        or "social media" in ind
+    ):
+        return "Digital Media & Ad Tech (數位媒體與廣告科技)", {
+            "PE": 25.0,
+            "PS": 7.0,
+            "PEG": 1.3,
+            "GM": 78.0,
+            "NM": 26.0,
+            "ROE": 22.0,
+        }
     elif "internet retail" in ind or "e-commerce" in ind:
-        return "E-Commerce & Digital Retail (電子商務與數位零售)", {"PE": 32.0, "PS": 2.8, "PEG": 1.4, "GM": 45.0, "NM": 8.0, "ROE": 18.0}
+        return "E-Commerce & Digital Retail (電子商務與數位零售)", {
+            "PE": 32.0,
+            "PS": 2.8,
+            "PEG": 1.4,
+            "GM": 45.0,
+            "NM": 8.0,
+            "ROE": 18.0,
+        }
     elif "auto" in ind or "ev" in ind:
-        return "Electric Vehicles & Auto (電動車與新興汽車)", {"PE": 45.0, "PS": 5.5, "PEG": 1.5, "GM": 22.0, "NM": 10.0, "ROE": 15.0}
+        return "Electric Vehicles & Auto (電動車與新興汽車)", {
+            "PE": 45.0,
+            "PS": 5.5,
+            "PEG": 1.5,
+            "GM": 22.0,
+            "NM": 10.0,
+            "ROE": 15.0,
+        }
     elif "biotech" in ind or "pharmaceutical" in ind:
-        return "Biotech & Pharma (生技與製藥)", {"PE": 24.0, "PS": 5.0, "PEG": 1.4, "GM": 65.0, "NM": 18.0, "ROE": 16.0}
+        return "Biotech & Pharma (生技與製藥)", {
+            "PE": 24.0,
+            "PS": 5.0,
+            "PEG": 1.4,
+            "GM": 65.0,
+            "NM": 18.0,
+            "ROE": 16.0,
+        }
     elif "bank" in ind or "financial" in ind:
-        return "Banking & Financial Services (銀行與金融服務)", {"PE": 12.0, "PS": 3.0, "PEG": 1.1, "GM": 50.0, "NM": 22.0, "ROE": 12.0}
+        return "Banking & Financial Services (銀行與金融服務)", {
+            "PE": 12.0,
+            "PS": 3.0,
+            "PEG": 1.1,
+            "GM": 50.0,
+            "NM": 22.0,
+            "ROE": 12.0,
+        }
     elif "energy" in ind or "oil" in ind:
-        return "Energy & Clean Tech (能源與潔淨科技)", {"PE": 14.0, "PS": 1.8, "PEG": 1.0, "GM": 38.0, "NM": 12.0, "ROE": 14.0}
+        return "Energy & Clean Tech (能源與潔淨科技)", {
+            "PE": 14.0,
+            "PS": 1.8,
+            "PEG": 1.0,
+            "GM": 38.0,
+            "NM": 12.0,
+            "ROE": 14.0,
+        }
     else:
-        return f"{sector_str} - General", {"PE": 20.0, "PS": 2.5, "PEG": 1.3, "GM": 35.0, "NM": 10.0, "ROE": 15.0}
+        return f"{sector_str} - General", {
+            "PE": 20.0,
+            "PS": 2.5,
+            "PEG": 1.3,
+            "GM": 35.0,
+            "NM": 10.0,
+            "ROE": 15.0,
+        }
 
 
 def get_industry_growth_profile(industry_str, sector_str):
@@ -628,11 +822,21 @@ def get_industry_growth_profile(industry_str, sector_str):
 
     if "semicon" in ind or "chip" in ind:
         return {"pess": 0.08, "base": 0.14, "opt": 0.22, "terminal": 0.035}
-    elif "software" in ind or "cloud" in ind or "saas" in ind or "infrastructure" in ind:
+    elif (
+        "software" in ind
+        or "cloud" in ind
+        or "saas" in ind
+        or "infrastructure" in ind
+    ):
         return {"pess": 0.09, "base": 0.15, "opt": 0.24, "terminal": 0.035}
     elif "consumer electronics" in ind or "hardware" in ind or "device" in ind:
         return {"pess": 0.06, "base": 0.10, "opt": 0.16, "terminal": 0.030}
-    elif "internet content" in ind or "interactive media" in ind or "social media" in ind or "advert" in ind:
+    elif (
+        "internet content" in ind
+        or "interactive media" in ind
+        or "social media" in ind
+        or "advert" in ind
+    ):
         return {"pess": 0.08, "base": 0.12, "opt": 0.18, "terminal": 0.030}
     elif "internet retail" in ind or "e-commerce" in ind or "retail" in ind:
         return {"pess": 0.07, "base": 0.11, "opt": 0.17, "terminal": 0.030}
@@ -649,9 +853,7 @@ def get_industry_growth_profile(industry_str, sector_str):
 
 
 def estimate_stock_growth_anchor(info, industry_profile):
-    """Primary growth anchor should come from the selected stock, not a generic industry average."""
     candidates = []
-
     for key in ["earningsGrowth", "revenueGrowth", "grossMargins", "operatingMargins"]:
         value = info.get(key)
         if isinstance(value, (int, float)) and pd.notna(value):
@@ -679,12 +881,15 @@ def estimate_stock_growth_anchor(info, industry_profile):
 
 
 def estimate_fcf_growth_anchor(fcf_history, industry_profile, fcf_dates=None):
-    """Use the latest three annual FCF growth rates and their trend as the forward anchor."""
     if fcf_dates and len(fcf_dates) == len(fcf_history):
         dated_fcf = sorted(zip(fcf_dates, fcf_history), key=lambda item: item[0])
-        chronological_fcf = [float(value) for _, value in dated_fcf if pd.notna(value)]
+        chronological_fcf = [
+            float(value) for _, value in dated_fcf if pd.notna(value)
+        ]
     else:
-        chronological_fcf = [float(value) for value in reversed(fcf_history) if pd.notna(value)]
+        chronological_fcf = [
+            float(value) for value in reversed(fcf_history) if pd.notna(value)
+        ]
 
     if len(chronological_fcf) < 4:
         return None, [], 0.0
@@ -716,12 +921,15 @@ def estimate_fcf_growth_anchor(fcf_history, industry_profile, fcf_dates=None):
 
 
 def estimate_net_income_growth_anchor(financials, info):
-    """Estimate a selected company's earnings growth without applying an industry cap."""
     net_income = None
     if not financials.empty:
         for row_name in ["Net Income", "Net Income Common Stockholders"]:
             if row_name in financials.index:
-                values = pd.to_numeric(financials.loc[row_name], errors="coerce").dropna().tolist()
+                values = (
+                    pd.to_numeric(financials.loc[row_name], errors="coerce")
+                    .dropna()
+                    .tolist()
+                )
                 if len(values) >= 2:
                     net_income = [float(value) for value in reversed(values)]
                     break
@@ -735,29 +943,18 @@ def estimate_net_income_growth_anchor(financials, info):
     reported_growth = info.get("earningsGrowth")
     if growth_rates:
         latest_growth = growth_rates[-1]
-        slope = float(np.polyfit(np.arange(len(growth_rates), dtype=float), growth_rates, 1)[0]) if len(growth_rates) >= 2 else 0.0
+        slope = (
+            float(np.polyfit(np.arange(len(growth_rates), dtype=float), growth_rates, 1)[0])
+            if len(growth_rates) >= 2
+            else 0.0
+        )
         return max(-0.50, min(latest_growth + (slope * 0.5), 1.00))
     if isinstance(reported_growth, (int, float)) and pd.notna(reported_growth):
         return max(-0.50, min(float(reported_growth), 1.00))
     return None
 
 
-def get_growth_signal_weights(industry_str, sector_str):
-    """Weight growth signals according to the economics of each business type."""
-    text = f"{industry_str or ''} {sector_str or ''}".lower()
-    if any(term in text for term in ["software", "cloud", "saas", "internet"]):
-        return {"fcf": 0.25, "net_income": 0.25, "revenue": 0.50}
-    if any(term in text for term in ["semicon", "chip", "hardware"]):
-        return {"fcf": 0.40, "net_income": 0.25, "revenue": 0.35}
-    if any(term in text for term in ["bank", "financial", "insurance"]):
-        return {"fcf": 0.20, "net_income": 0.50, "revenue": 0.30}
-    if any(term in text for term in ["energy", "oil", "utility", "auto"]):
-        return {"fcf": 0.50, "net_income": 0.30, "revenue": 0.20}
-    return {"fcf": 0.40, "net_income": 0.30, "revenue": 0.30}
-
-
 def classify_corporate_lifecycle(revenue_growth, fcf_margin, negative_trend=False):
-    """Classify the company and return its signal weights and minimum forecast growth."""
     revenue_growth = float(revenue_growth) if pd.notna(revenue_growth) else 0.0
     fcf_margin = float(fcf_margin) if pd.notna(fcf_margin) else 0.0
 
@@ -768,8 +965,11 @@ def classify_corporate_lifecycle(revenue_growth, fcf_margin, negative_trend=Fals
     if revenue_growth <= 0.15 and fcf_margin >= 0.10:
         return "Cash Cow", {"fcf": 0.60, "net_income": 0.30, "revenue": 0.10}, -0.02, 0.025
     return "Question Mark", {"fcf": 0.10, "net_income": 0.10, "revenue": 0.80}, 0.00, 0.015
-def adjust_growth_weights_for_scale(weights, market_cap, net_income_growth, fcf_growth, capex_intensity):
-    """Adjust lifecycle weights for company scale and temporary investment-heavy FCF."""
+
+
+def adjust_growth_weights_for_scale(
+    weights, market_cap, net_income_growth, fcf_growth, capex_intensity
+):
     market_cap = float(market_cap or 0.0)
     if market_cap >= 200_000_000_000:
         size_label = "Mega Cap (>= $200B)"
@@ -805,7 +1005,6 @@ def adjust_growth_weights_for_scale(weights, market_cap, net_income_growth, fcf_
 
 
 def get_revenue_growth_anchor(info):
-    """Return the selected company's reported revenue growth within a broad sanity range."""
     revenue_growth = info.get("revenueGrowth")
     if isinstance(revenue_growth, (int, float)) and pd.notna(revenue_growth):
         return max(-0.50, min(float(revenue_growth), 1.00))
@@ -823,7 +1022,6 @@ def calculate_fcfe_dcf(
     exit_multiple,
     total_shares_outstanding,
 ):
-    """Calculate an FCFE valuation from revenue, margin, conversion, and an exit multiple."""
     revenue = max(float(base_revenue), 0.0)
     growth_rate = max(-0.50, min(float(revenue_growth_rate), 1.00))
     net_margin = max(0.0, min(float(target_net_margin), 1.00))
@@ -858,7 +1056,8 @@ def calculate_fcfe_dcf(
     value_per_share = total_present_value / shares if shares > 0 else 0.0
     valuation_difference = (
         ((float(current_stock_price) - value_per_share) / value_per_share) * 100
-        if value_per_share > 0 else 0.0
+        if value_per_share > 0
+        else 0.0
     )
     status = "Overvalued" if valuation_difference >= 0 else "Undervalued"
 
@@ -873,89 +1072,107 @@ def calculate_fcfe_dcf(
         "exitMultiple": multiple,
     }
 
+
 def classify_trend_status(df):
     if df.empty or len(df) < 55:
         return "資料不足", "無法計算趨勢"
 
-    curr_p = df['Close'].iloc[-1]
-    ma10 = df['MA10'].iloc[-1]
-    ma20 = df['MA20'].iloc[-1]
-    ma55 = df['MA55'].iloc[-1]
-    ma20_slope = df['MA20'].iloc[-1] - df['MA20'].iloc[-5] if len(df) >= 5 else 0
+    curr_p = df["Close"].iloc[-1]
+    ma10 = df["MA10"].iloc[-1]
+    ma20 = df["MA20"].iloc[-1]
+    ma55 = df["MA55"].iloc[-1]
+    ma20_slope = df["MA20"].iloc[-1] - df["MA20"].iloc[-5] if len(df) >= 5 else 0
 
-    ma250_valid = 'MA250' in df.columns and pd.notna(df['MA250'].iloc[-1])
-    ma250 = df['MA250'].iloc[-1] if ma250_valid else ma55
+    ma250_valid = "MA250" in df.columns and pd.notna(df["MA250"].iloc[-1])
+    ma250 = df["MA250"].iloc[-1] if ma250_valid else ma55
 
-    is_perfect_bull = (curr_p > ma10 > ma20 > ma55) and (not ma250_valid or ma55 > ma250)
-    is_perfect_bear = (curr_p < ma10 < ma20 < ma55) and (not ma250_valid or ma55 < ma250)
+    is_perfect_bull = (curr_p > ma10 > ma20 > ma55) and (
+        not ma250_valid or ma55 > ma250
+    )
+    is_perfect_bear = (curr_p < ma10 < ma20 < ma55) and (
+        not ma250_valid or ma55 < ma250
+    )
 
     if is_perfect_bull and ma20_slope > 0:
         status = "🚀 強勢多頭 (Strong Bull)"
-        desc = f"完美多頭排列 (Price ${curr_p:.2f} > MA10 > MA20 > MA55)，月線向上斜率正向，資金全面控盤。"
+        desc = (
+            f"完美多頭排列 (Price ${curr_p:.2f} > MA10 > MA20 > MA55)，月線向上斜率正向，資金全面控盤。"
+        )
     elif curr_p > ma20 and ma20 > ma55 and not is_perfect_bull:
         status = "📈 弱勢多頭 / 回檔整理 (Weak Bull)"
-        desc = f"中期多頭格局未變 (Price > MA20 > MA55)，但短線 MA10 震盪或股價短踩，屬多頭回檔健康整理。"
+        desc = (
+            "中期多頭格局未變 (Price > MA20 > MA55)，但短線 MA10 震盪或股價短踩，屬多頭回檔健康整理。"
+        )
     elif is_perfect_bear and ma20_slope < 0:
         status = "🩸 強勢空頭 (Strong Bear)"
-        desc = f"完美空頭排列 (Price ${curr_p:.2f} < MA10 < MA20 < MA55)，均線全面下彎且極具下行壓力。"
+        desc = (
+            f"完美空頭排列 (Price ${curr_p:.2f} < MA10 < MA20 < MA55)，均線全面下彎且極具下行壓力。"
+        )
     elif curr_p < ma20 and ma20 < ma55 and not is_perfect_bear:
         status = "📉 弱勢空頭 / 反彈波 (Weak Bear)"
-        desc = f"中期趨勢偏空 (Price < MA20 < MA55)，但短線價格接近短期均線，屬空頭架構下的弱勢反彈。"
+        desc = (
+            "中期趨勢偏空 (Price < MA20 < MA55)，但短線價格接近短期均線，屬空頭架構下的弱勢反彈。"
+        )
     else:
         status = "⚖️ 區間震盪整理 (Consolidation)"
-        desc = f"均線交錯糾結於 ${ma20:.2f} ~ ${ma55:.2f} 區間，多空動能互相抵消，等待量價突破指引方向。"
+        desc = (
+            f"均線交錯糾結於 ${ma20:.2f} ~ ${ma55:.2f} 區間，多空動能互相抵消，等待量價突破指引方向。"
+        )
 
     return status, desc
+
 
 def scan_all_macd_divergences(df, window=5, min_gap_days=10):
     if len(df) < 60 or "MACD" not in df.columns:
         return []
-    
+
     raw_divergences = []
-    prices = df['Close'].values
-    macds = df['MACD'].values
+    prices = df["Close"].values
+    macds = df["MACD"].values
     dates = df.index
     n = len(df)
-    
+
     piv_lows = []
     piv_highs = []
-    
+
     for i in range(window, n - window):
-        if all(prices[i] <= prices[i-j] for j in range(1, window+1)) and \
-           all(prices[i] <= prices[i+j] for j in range(1, window+1)):
+        if all(prices[i] <= prices[i - j] for j in range(1, window + 1)) and all(
+            prices[i] <= prices[i + j] for j in range(1, window + 1)
+        ):
             piv_lows.append((i, dates[i], prices[i], macds[i]))
-            
-        if all(prices[i] >= prices[i-j] for j in range(1, window+1)) and \
-           all(prices[i] >= prices[i+j] for j in range(1, window+1)):
+
+        if all(prices[i] >= prices[i - j] for j in range(1, window + 1)) and all(
+            prices[i] >= prices[i + j] for j in range(1, window + 1)
+        ):
             piv_highs.append((i, dates[i], prices[i], macds[i]))
-            
+
     for k in range(1, len(piv_lows)):
         i2, d2, p2, m2 = piv_lows[k]
-        i1, d1, p1, m1 = piv_lows[k-1]
+        i1, d1, p1, m1 = piv_lows[k - 1]
         if (i2 - i1) <= 60:
             if p2 < p1 and m2 > m1:
                 raw_divergences.append({
-                    'index': i2,
-                    'date': d2,
-                    'type': '看多背離 (Bullish)',
-                    'price': p2,
-                    'macd': m2
+                    "index": i2,
+                    "date": d2,
+                    "type": "看多背離 (Bullish)",
+                    "price": p2,
+                    "macd": m2,
                 })
 
     for k in range(1, len(piv_highs)):
         i2, d2, p2, m2 = piv_highs[k]
-        i1, d1, p1, m1 = piv_highs[k-1]
+        i1, d1, p1, m1 = piv_highs[k - 1]
         if (i2 - i1) <= 60:
             if p2 > p1 and m2 < m1:
                 raw_divergences.append({
-                    'index': i2,
-                    'date': d2,
-                    'type': '看空背離 (Bearish)',
-                    'price': p2,
-                    'macd': m2
+                    "index": i2,
+                    "date": d2,
+                    "type": "看空背離 (Bearish)",
+                    "price": p2,
+                    "macd": m2,
                 })
 
-    raw_divergences.sort(key=lambda x: x['index'])
+    raw_divergences.sort(key=lambda x: x["index"])
 
     filtered_divergences = []
     for div in raw_divergences:
@@ -963,7 +1180,9 @@ def scan_all_macd_divergences(df, window=5, min_gap_days=10):
             filtered_divergences.append(div)
         else:
             last_div = filtered_divergences[-1]
-            if (div['index'] - last_div['index']) >= min_gap_days or div['type'] != last_div['type']:
+            if (
+                div["index"] - last_div["index"]
+            ) >= min_gap_days or div["type"] != last_div["type"]:
                 filtered_divergences.append(div)
             else:
                 filtered_divergences[-1] = div
@@ -972,7 +1191,6 @@ def scan_all_macd_divergences(df, window=5, min_gap_days=10):
 
 
 def scan_indicator_divergences(df, indicator_column, window=5, min_gap_days=10):
-    """Find price/indicator swing divergences for RSI or another oscillator."""
     if len(df) < (window * 2 + 5) or indicator_column not in df.columns:
         return []
 
@@ -984,11 +1202,15 @@ def scan_indicator_divergences(df, indicator_column, window=5, min_gap_days=10):
     for index in range(window, len(df) - window):
         if not np.isfinite(indicator[index]):
             continue
-        if all(prices[index] <= prices[index - offset] for offset in range(1, window + 1)) and all(
+        if all(
+            prices[index] <= prices[index - offset] for offset in range(1, window + 1)
+        ) and all(
             prices[index] <= prices[index + offset] for offset in range(1, window + 1)
         ):
             piv_lows.append((index, dates[index], prices[index], indicator[index]))
-        if all(prices[index] >= prices[index - offset] for offset in range(1, window + 1)) and all(
+        if all(
+            prices[index] >= prices[index - offset] for offset in range(1, window + 1)
+        ) and all(
             prices[index] >= prices[index + offset] for offset in range(1, window + 1)
         ):
             piv_highs.append((index, dates[index], prices[index], indicator[index]))
@@ -1000,12 +1222,18 @@ def scan_indicator_divergences(df, indicator_column, window=5, min_gap_days=10):
             index_2, date_2, price_2, value_2 = second
             if index_2 - index_1 > 60:
                 continue
-            is_divergence = (price_2 < price_1 and value_2 > value_1) if bullish else (price_2 > price_1 and value_2 < value_1)
+            is_divergence = (
+                (price_2 < price_1 and value_2 > value_1)
+                if bullish
+                else (price_2 > price_1 and value_2 < value_1)
+            )
             if is_divergence:
                 divergences.append({
                     "index": index_2,
                     "date": date_2,
-                    "type": "看多背離 (Bullish)" if bullish else "看空背離 (Bearish)",
+                    "type": (
+                        "看多背離 (Bullish)" if bullish else "看空背離 (Bearish)"
+                    ),
                     "price": price_2,
                     "indicator": value_2,
                 })
@@ -1013,7 +1241,11 @@ def scan_indicator_divergences(df, indicator_column, window=5, min_gap_days=10):
     divergences.sort(key=lambda item: item["index"])
     filtered = []
     for divergence in divergences:
-        if not filtered or divergence["index"] - filtered[-1]["index"] >= min_gap_days or divergence["type"] != filtered[-1]["type"]:
+        if (
+            not filtered
+            or divergence["index"] - filtered[-1]["index"] >= min_gap_days
+            or divergence["type"] != filtered[-1]["type"]
+        ):
             filtered.append(divergence)
         else:
             filtered[-1] = divergence
@@ -1021,23 +1253,33 @@ def scan_indicator_divergences(df, indicator_column, window=5, min_gap_days=10):
 
 
 def calculate_rsi(series, period=14):
-    """Calculate Wilder-style RSI while preserving the source index."""
     delta = series.diff()
     gains = delta.clip(lower=0)
     losses = -delta.clip(upper=0)
-    average_gain = gains.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    average_loss = losses.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    average_gain = gains.ewm(
+        alpha=1 / period, min_periods=period, adjust=False
+    ).mean()
+    average_loss = losses.ewm(
+        alpha=1 / period, min_periods=period, adjust=False
+    ).mean()
     relative_strength = average_gain / average_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + relative_strength))
     return rsi.fillna(100.0).where(average_gain > 0, 0.0)
 
 
 def summarize_bollinger_state(df):
-    """Return current Bollinger condition labels for narrative and UI output."""
     if df.empty or "BB_Upper" not in df.columns:
-        return {"squeeze": False, "tag": "Neutral", "percent_b": np.nan, "bandwidth": np.nan}
+        return {
+            "squeeze": False,
+            "tag": "Neutral",
+            "percent_b": np.nan,
+            "bandwidth": np.nan,
+        }
     latest = df.iloc[-1]
-    squeeze = bool(latest["BB_Bandwidth"] <= df["BB_Bandwidth"].rolling(120, min_periods=20).quantile(0.20).iloc[-1])
+    squeeze = bool(
+        latest["BB_Bandwidth"]
+        <= df["BB_Bandwidth"].rolling(120, min_periods=20).quantile(0.20).iloc[-1]
+    )
     close = float(latest["Close"])
     upper = float(latest["BB_Upper"])
     lower = float(latest["BB_Lower"])
@@ -1048,12 +1290,16 @@ def summarize_bollinger_state(df):
         tag = "Lower Band Tag"
     else:
         tag = "Neutral"
-    return {"squeeze": squeeze, "tag": tag, "percent_b": float(latest["BB_%B"]), "bandwidth": float(latest["BB_Bandwidth"])}
+    return {
+        "squeeze": squeeze,
+        "tag": tag,
+        "percent_b": float(latest["BB_%B"]),
+        "bandwidth": float(latest["BB_Bandwidth"]),
+    }
 
 
 @st.cache_data(ttl=300)
 def fetch_options_analysis(symbol_str, current_price):
-    """Fetch near-term option chains and summarize PCR, IV, max pain, and UOA."""
     try:
         ticker = yf.Ticker(to_yfinance_symbol(symbol_str))
         today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
@@ -1064,7 +1310,10 @@ def fetch_options_analysis(symbol_str, current_price):
             if 0 <= days_to_expiry <= 45:
                 expirations.append((expiry, expiry_date))
         if not expirations:
-            return {"available": False, "message": "近 45 天內沒有可用的選擇權到期日。"}
+            return {
+                "available": False,
+                "message": "近 45 天內沒有可用的選擇權到期日。",
+            }
 
         chain_frames = []
         for expiry, expiry_date in expirations:
@@ -1080,12 +1329,26 @@ def fetch_options_analysis(symbol_str, current_price):
             return {"available": False, "message": "券商未提供近期期權鏈資料。"}
 
         options = pd.concat(chain_frames, ignore_index=True)
-        for column in ["volume", "openInterest", "impliedVolatility", "lastPrice", "strike"]:
+        for column in [
+            "volume",
+            "openInterest",
+            "impliedVolatility",
+            "lastPrice",
+            "strike",
+        ]:
             if column not in options:
                 options[column] = 0.0
-            options[column] = pd.to_numeric(options[column], errors="coerce").fillna(0.0)
-        options["Vol/OI Ratio"] = np.where(options["openInterest"] > 0, options["volume"] / options["openInterest"], np.inf)
-        options["Estimated Trade Value"] = options["volume"] * options["lastPrice"] * 100
+            options[column] = pd.to_numeric(
+                options[column], errors="coerce"
+            ).fillna(0.0)
+        options["Vol/OI Ratio"] = np.where(
+            options["openInterest"] > 0,
+            options["volume"] / options["openInterest"],
+            np.inf,
+        )
+        options["Estimated Trade Value"] = (
+            options["volume"] * options["lastPrice"] * 100
+        )
 
         calls = options[options["Option Type"] == "Call"]
         puts = options[options["Option Type"] == "Put"]
@@ -1101,28 +1364,71 @@ def fetch_options_analysis(symbol_str, current_price):
         if strikes:
             pain_by_strike = {}
             for settlement in strikes:
-                call_pain = ((settlement - calls["strike"]).clip(lower=0) * calls["openInterest"]).sum()
-                put_pain = ((puts["strike"] - settlement).clip(lower=0) * puts["openInterest"]).sum()
+                call_pain = (
+                    (settlement - calls["strike"]).clip(lower=0)
+                    * calls["openInterest"]
+                ).sum()
+                put_pain = (
+                    (puts["strike"] - settlement).clip(lower=0)
+                    * puts["openInterest"]
+                ).sum()
                 pain_by_strike[settlement] = call_pain + put_pain
             max_pain = min(pain_by_strike, key=pain_by_strike.get)
 
         atm_distance = (options["strike"] - float(current_price)).abs()
-        near_money = options.loc[atm_distance <= max(float(current_price) * 0.10, 1.0)]
-        call_iv = near_money.loc[near_money["Option Type"] == "Call", "impliedVolatility"]
-        put_iv = near_money.loc[near_money["Option Type"] == "Put", "impliedVolatility"]
+        near_money = options.loc[
+            atm_distance <= max(float(current_price) * 0.10, 1.0)
+        ]
+        call_iv = near_money.loc[
+            near_money["Option Type"] == "Call", "impliedVolatility"
+        ]
+        put_iv = near_money.loc[
+            near_money["Option Type"] == "Put", "impliedVolatility"
+        ]
         iv_summary = {
-            "Call IV": float(call_iv.replace(0, np.nan).median()) if not call_iv.empty else np.nan,
-            "Put IV": float(put_iv.replace(0, np.nan).median()) if not put_iv.empty else np.nan,
+            "Call IV": (
+                float(call_iv.replace(0, np.nan).median())
+                if not call_iv.empty
+                else np.nan
+            ),
+            "Put IV": (
+                float(put_iv.replace(0, np.nan).median())
+                if not put_iv.empty
+                else np.nan
+            ),
         }
-        iv_summary["Put-Call IV Skew"] = iv_summary["Put IV"] - iv_summary["Call IV"] if pd.notna(iv_summary["Put IV"]) and pd.notna(iv_summary["Call IV"]) else np.nan
+        iv_summary["Put-Call IV Skew"] = (
+            iv_summary["Put IV"] - iv_summary["Call IV"]
+            if pd.notna(iv_summary["Put IV"]) and pd.notna(iv_summary["Call IV"])
+            else np.nan
+        )
 
-        unusual = options[(options["volume"] > 2.5 * options["openInterest"]) & (options["volume"] > 1000)].copy()
-        unusual = unusual.sort_values(["Estimated Trade Value", "volume"], ascending=False)
-        unusual = unusual.rename(columns={
-            "strike": "Strike Price", "impliedVolatility": "Implied Volatility",
-            "volume": "Volume", "openInterest": "Open Interest", "lastPrice": "Last Price",
-        })
-        display_columns = ["Strike Price", "Expiry", "Option Type", "Volume", "Open Interest", "Vol/OI Ratio", "Implied Volatility", "Estimated Trade Value"]
+        unusual = options[
+            (options["volume"] > 2.5 * options["openInterest"])
+            & (options["volume"] > 1000)
+        ].copy()
+        unusual = unusual.sort_values(
+            ["Estimated Trade Value", "volume"], ascending=False
+        )
+        unusual = unusual.rename(
+            columns={
+                "strike": "Strike Price",
+                "impliedVolatility": "Implied Volatility",
+                "volume": "Volume",
+                "openInterest": "Open Interest",
+                "lastPrice": "Last Price",
+            }
+        )
+        display_columns = [
+            "Strike Price",
+            "Expiry",
+            "Option Type",
+            "Volume",
+            "Open Interest",
+            "Vol/OI Ratio",
+            "Implied Volatility",
+            "Estimated Trade Value",
+        ]
         return {
             "available": True,
             "expirations": [expiry for expiry, _ in expirations],
@@ -1139,71 +1445,115 @@ def fetch_options_analysis(symbol_str, current_price):
 
 
 def interpret_options_flow(options_summary):
-    """Provide a transparent, rule-based interpretation of unusual options flow."""
     unusual = options_summary.get("unusual", pd.DataFrame())
     if unusual.empty:
         return "目前沒有符合 Volume > 2.5x OI 且 Volume > 1,000 的異常大單。"
-    call_value = unusual.loc[unusual["Option Type"] == "Call", "Estimated Trade Value"].sum()
-    put_value = unusual.loc[unusual["Option Type"] == "Put", "Estimated Trade Value"].sum()
+    call_value = unusual.loc[
+        unusual["Option Type"] == "Call", "Estimated Trade Value"
+    ].sum()
+    put_value = unusual.loc[
+        unusual["Option Type"] == "Put", "Estimated Trade Value"
+    ].sum()
     if call_value > put_value * 1.5:
         return "異常流量以 Call 名目金額為主，顯示智能資金偏向積極做多，但仍需結合 IV 與成交價判斷是否為買方。"
     if put_value > call_value * 1.5:
         return "異常流量以 Put 名目金額為主，較接近下行避險或偏空布局，需觀察 Put IV Skew 是否同步走高。"
     return "Call 與 Put 異常流量相對均衡，可能包含跨式策略或波動率交易，暫不宜解讀為單方向押注。"
 
+
 def find_smart_support_resistance(df, window=5):
     if df.empty or len(df) < 30:
-        fallback_low = df['Low'].min() if not df.empty else 10.0
-        fallback_high = df['High'].max() if not df.empty else 100.0
+        fallback_low = df["Low"].min() if not df.empty else 10.0
+        fallback_high = df["High"].max() if not df.empty else 100.0
         return fallback_low, fallback_high
-    
-    prices_high = df['High'].values
-    prices_low = df['Low'].values
+
+    prices_high = df["High"].values
+    prices_low = df["Low"].values
     n = len(df)
-    
+
     swing_highs = []
     swing_lows = []
-    
+
     for i in range(window, n - window):
-        if all(prices_low[i] <= prices_low[i-j] for j in range(1, window+1)) and \
-           all(prices_low[i] <= prices_low[i+j] for j in range(1, window+1)):
+        if all(prices_low[i] <= prices_low[i - j] for j in range(1, window + 1)) and all(
+            prices_low[i] <= prices_low[i + j] for j in range(1, window + 1)
+        ):
             swing_lows.append(prices_low[i])
-            
-        if all(prices_high[i] >= prices_high[i-j] for j in range(1, window+1)) and \
-           all(prices_high[i] >= prices_high[i+j] for j in range(1, window+1)):
+
+        if all(
+            prices_high[i] >= prices_high[i - j] for j in range(1, window + 1)
+        ) and all(
+            prices_high[i] >= prices_high[i + j] for j in range(1, window + 1)
+        ):
             swing_highs.append(prices_high[i])
-            
-    curr_price = df['Close'].iloc[-1]
-    
+
+    curr_price = df["Close"].iloc[-1]
+
     valid_supps = [s for s in swing_lows if s < curr_price]
-    support = max(valid_supps) if valid_supps else df['Low'].min()
-    
+    support = max(valid_supps) if valid_supps else df["Low"].min()
+
     valid_res = [r for r in swing_highs if r > curr_price]
-    resistance = min(valid_res) if valid_res else df['High'].max()
-    
+    resistance = min(valid_res) if valid_res else df["High"].max()
+
     return support, resistance
+
 
 def find_volume_poc(df, bins=15):
     if df.empty or len(df) < 30:
-        return df['Close'].mean() if not df.empty else 0.0
-    hist, bin_edges = np.histogram(df['Close'], bins=bins, weights=df['Volume'])
+        return df["Close"].mean() if not df.empty else 0.0
+    hist, bin_edges = np.histogram(df["Close"], bins=bins, weights=df["Volume"])
     max_idx = np.argmax(hist)
-    poc_price = (bin_edges[max_idx] + bin_edges[max_idx+1]) / 2.0
+    poc_price = (bin_edges[max_idx] + bin_edges[max_idx + 1]) / 2.0
     return poc_price
 
-def generate_technical_narrative(symbol, curr_price, ma10, ma20, ma55, ma250, gunshot, div_type, support, resistance, fib_618, poc_price, trend_status, trend_desc, ma250_valid=True, rsi_value=None, rsi_div_type="Neutral", bollinger_state=None, macd_divergence=False):
+
+def generate_technical_narrative(
+    symbol,
+    curr_price,
+    ma10,
+    ma20,
+    ma55,
+    ma250,
+    gunshot,
+    div_type,
+    support,
+    resistance,
+    fib_618,
+    poc_price,
+    trend_status,
+    trend_desc,
+    ma250_valid=True,
+    rsi_value=None,
+    rsi_div_type="Neutral",
+    bollinger_state=None,
+    macd_divergence=False,
+):
     narrative = []
-    
-    narrative.append(f"**【均線型態與趨勢等級】**\n當前標的經多因子模型分類為：**{trend_status}**。\n{trend_desc}")
-    
+
+    narrative.append(
+        f"**【均線型態與趨勢等級】**\n當前標的經多因子模型分類為：**{trend_status}**。\n{trend_desc}"
+    )
+
     if div_type == "看多背離 (Bullish)":
-        div_desc = "指標面上，近期觸發「看多背離」訊號。雖然價格波段探低，但下行賣壓顯著減弱，機構資金有暗中承接跡象。"
+        div_desc = (
+            "指標面上，近期觸發「看多背離」訊號。雖然價格波段探低，但下行賣壓顯著減弱，機構資金有暗中承接跡象。"
+        )
     elif div_type == "看空背離 (Bearish)":
-        div_desc = "指標面上，近期出現「看空背離」預警。股價攀高過程中動能未同步放大，提防高檔誘多後的回檔修正。"
+        div_desc = (
+            "指標面上，近期出現「看空背離」預警。股價攀高過程中動能未同步放大，提防高檔誘多後的回檔修正。"
+        )
     else:
         div_desc = "指標面上，MACD 與價格同步運行，未見明顯動能背離。"
-    rsi_value = float(rsi_value) if rsi_value is not None and pd.notna(rsi_value) else np.nan
-    bollinger_state = bollinger_state or {"squeeze": False, "tag": "Neutral", "percent_b": np.nan}
+    rsi_value = (
+        float(rsi_value)
+        if rsi_value is not None and pd.notna(rsi_value)
+        else np.nan
+    )
+    bollinger_state = bollinger_state or {
+        "squeeze": False,
+        "tag": "Neutral",
+        "percent_b": np.nan,
+    }
     rsi_state = "超買" if rsi_value > 70 else "超賣" if rsi_value < 30 else "中性"
     rsi_desc = f"RSI(14) 為 {rsi_value:.1f}（{rsi_state}）"
     if rsi_div_type != "Neutral":
@@ -1212,16 +1562,31 @@ def generate_technical_narrative(symbol, curr_price, ma10, ma20, ma55, ma250, gu
         rsi_desc += "，尚未發現 RSI 背離。"
     narrative.append(f"**【指標動能與背離分析】**\n{div_desc}\n{rsi_desc}")
 
-    dist_to_supp = ((curr_price - support) / curr_price) * 100 if curr_price > 0 else 0
-    dist_to_res = ((resistance - curr_price) / curr_price) * 100 if curr_price > 0 else 0
-    of_desc = f"波段關鍵支撐位落在 **${support:.2f}** (距今 {dist_to_supp:.1f}%)，關鍵壓力位在 **${resistance:.2f}** (距今 {dist_to_res:.1f}%)。"
+    dist_to_supp = (
+        ((curr_price - support) / curr_price) * 100 if curr_price > 0 else 0
+    )
+    dist_to_res = (
+        ((resistance - curr_price) / curr_price) * 100 if curr_price > 0 else 0
+    )
+    of_desc = (
+        f"波段關鍵支撐位落在 **${support:.2f}** (距今 {dist_to_supp:.1f}%)，關鍵壓力位在"
+        f" **${resistance:.2f}** (距今 {dist_to_res:.1f}%)。"
+    )
     of_desc += f" 籌碼最大密集區 (POC) 落在 **${poc_price:.2f}**。"
     if curr_price > 0 and abs(curr_price - fib_618) / curr_price < 0.02:
-        of_desc += f" 值得注意，當前股價接近斐波那契黃金分割支撐 61.8% (**${fib_618:.2f}**)，具備機構買盤防守力道。"
+        of_desc += (
+            " 值得注意，當前股價接近斐波那契黃金分割支撐 61.8%"
+            f" (**${fib_618:.2f}**)，具備機構買盤防守力道。"
+        )
     if bollinger_state.get("tag") != "Neutral":
-        of_desc += f" Bollinger {bollinger_state['tag']}，%B={bollinger_state.get('percent_b', np.nan):.2f}。"
+        of_desc += (
+            f" Bollinger {bollinger_state['tag']}，%B="
+            f"{bollinger_state.get('percent_b', np.nan):.2f}。"
+        )
     if bollinger_state.get("squeeze"):
-        of_desc += " Bollinger Bandwidth 位於近期低分位，屬波動壓縮狀態，需留意突破。"
+        of_desc += (
+            " Bollinger Bandwidth 位於近期低分位，屬波動壓縮狀態，需留意突破。"
+        )
     narrative.append(f"**【關鍵關卡與訂單流佈局】**\n{of_desc}")
 
     confluence_entry = (
@@ -1229,17 +1594,34 @@ def generate_technical_narrative(symbol, curr_price, ma10, ma20, ma55, ma250, gu
         or (curr_price > 0 and abs(curr_price - fib_618) / curr_price < 0.02)
     ) and (rsi_div_type == "看多背離 (Bullish)" or div_type == "看多背離 (Bullish)")
     if confluence_entry:
-        decision = "🎯 **機構策略**：價格位於 Bollinger 下軌或 61.8% 支撐附近，且 RSI/MACD 出現看多背離，形成高信念反轉共振，可採分批建倉並以支撐失守控管風險。"
+        decision = (
+            "🎯 **機構策略**：價格位於 Bollinger 下軌或 61.8%"
+            " 支撐附近，且 RSI/MACD"
+            " 出現看多背離，形成高信念反轉共振，可採分批建倉並以支撐失守控管風險。"
+        )
     elif gunshot and (div_type != "看空背離 (Bearish)"):
-        decision = "🎯 **機構策略**：符合 Livermore 第一槍爆發型態（爆量+突破），且無空頭背離，可採取順勢突破建倉策略，將停損設於突破 K 棒低點。"
+        decision = (
+            "🎯 **機構策略**：符合 Livermore"
+            " 第一槍爆發型態（爆量+突破），且無空頭背離，可採取順勢突破建倉策略，將停損設於突破"
+            " K 棒低點。"
+        )
     elif div_type == "看多背離 (Bullish)" and curr_price <= support * 1.05:
-        decision = "🎯 **機構策略**：符合弱勢左側抄底買點（看多背離 + 近關鍵支撐區），風險報酬比優良，適合分批佈局。"
+        decision = (
+            "🎯 **機構策略**：符合弱勢左側抄底買點（看多背離 +"
+            " 近關鍵支撐區），風險報酬比優良，適合分批佈局。"
+        )
     elif curr_price >= resistance * 0.98:
-        decision = "🎯 **機構策略**：股價逼近前高壓力區，追高風險偏高，建議等待爆量突破後回踩不破再行加碼。"
+        decision = (
+            "🎯"
+            " **機構策略**：股價逼近前高壓力區，追高風險偏高，建議等待爆量突破後回踩不破再行加碼。"
+        )
     else:
-        decision = "🎯 **機構策略**：當前處於區間震盪整理，建議維持觀望，或於黃金分割支撐位附近佈局。"
+        decision = (
+            "🎯"
+            " **機構策略**：當前處於區間震盪整理，建議維持觀望，或於黃金分割支撐位附近佈局。"
+        )
     narrative.append(f"**【綜合實戰決策總結】**\n{decision}")
-    
+
     return "\n\n".join(narrative)
 
 
@@ -1255,51 +1637,91 @@ def open_scanner_signal():
 
 if app_view == "Scanner Dashboard":
     st.title("📡 Watchlist Dual Divergence Scanner")
-    st.caption("Daily RSI(14) and MACD(12,26,9) must confirm at the same price-pivot candle within the last 90 calendar days.")
+    st.caption(
+        "Daily RSI(14) and MACD(12,26,9) must confirm at the same price-pivot"
+        " candle within the last 90 calendar days."
+    )
     scan_rows = []
     scan_errors = []
     total_tickers = len(st.session_state.watchlist)
-    scan_progress = st.progress(0, text="Scanning saved watchlist...") if total_tickers else None
-    for ticker_index, ticker_symbol in enumerate(st.session_state.watchlist, start=1):
+    scan_progress = (
+        st.progress(0, text="Scanning saved watchlist...")
+        if total_tickers
+        else None
+    )
+    for ticker_index, ticker_symbol in enumerate(
+        st.session_state.watchlist, start=1
+    ):
         try:
             ticker_history = fetch_scanner_history(ticker_symbol)
             for signal in find_dual_divergences(ticker_history):
                 scan_rows.append({"Ticker": ticker_symbol, **signal})
-            time.sleep(0.2)    
         except Exception as error:
             scan_errors.append(f"{ticker_symbol}: {error}")
         if scan_progress:
-            scan_progress.progress(ticker_index / total_tickers, text=f"Scanning {ticker_symbol} ({ticker_index}/{total_tickers})")
+            scan_progress.progress(
+                ticker_index / total_tickers,
+                text=f"Scanning {ticker_symbol} ({ticker_index}/{total_tickers})",
+            )
     if scan_progress:
         scan_progress.empty()
 
     scan_frame = pd.DataFrame(scan_rows)
-    bullish_count = int((scan_frame["Signal Type"] == "Bullish").sum()) if not scan_frame.empty else 0
-    bearish_count = int((scan_frame["Signal Type"] == "Bearish").sum()) if not scan_frame.empty else 0
+    bullish_count = (
+        int((scan_frame["Signal Type"] == "Bullish").sum())
+        if not scan_frame.empty
+        else 0
+    )
+    bearish_count = (
+        int((scan_frame["Signal Type"] == "Bearish").sum())
+        if not scan_frame.empty
+        else 0
+    )
     metric_bull, metric_bear, metric_total = st.columns(3)
     metric_bull.metric("🚀 Bullish alerts", bullish_count)
     metric_bear.metric("🚨 Bearish alerts", bearish_count)
     metric_total.metric("Watchlist tickers", len(st.session_state.watchlist))
     if scan_errors:
         with st.expander(f"Unavailable symbols ({len(scan_errors)})"):
-            st.caption("These tickers could not be loaded from Yahoo Finance in this scan.")
+            st.caption(
+                "These tickers could not be loaded from Yahoo Finance in this scan."
+            )
             st.write("\n".join(scan_errors))
 
     if scan_frame.empty:
-        st.info("No same-day dual divergence alerts were found in the saved watchlist during the last 90 days.")
+        st.info(
+            "No same-day dual divergence alerts were found in the saved watchlist"
+            " during the last 90 days."
+        )
     else:
-        st.caption("Price is the divergence pivot; performance is measured from the trigger-day close to the latest available daily price.")
+        st.caption(
+            "Price is the divergence pivot; performance is measured from the"
+            " trigger-day close to the latest available daily price."
+        )
         display_frame = scan_frame[[
-            "Ticker", "Signal Type", "Trigger Date", "Price", "Trigger Close",
-            "Latest Price", "Change ($)", "Change (%)", "RSI", "MACD",
+            "Ticker",
+            "Signal Type",
+            "Trigger Date",
+            "Price",
+            "Trigger Close",
+            "Latest Price",
+            "Change ($)",
+            "Change (%)",
+            "RSI",
+            "MACD",
         ]].copy()
         display_frame["Trigger Date"] = display_frame["Trigger Date"].map(
             lambda trigger_date: pd.Timestamp(trigger_date).strftime("%Y-%m-%d")
         )
         st.dataframe(
             display_frame.style.format({
-                "Price": "${:.2f}", "Trigger Close": "${:.2f}", "Latest Price": "${:.2f}",
-                "Change ($)": "{:+.2f}", "Change (%)": "{:+.2f}%", "RSI": "{:.1f}", "MACD": "{:.3f}",
+                "Price": "${:.2f}",
+                "Trigger Close": "${:.2f}",
+                "Latest Price": "${:.2f}",
+                "Change ($)": "{:+.2f}",
+                "Change (%)": "{:+.2f}%",
+                "RSI": "{:.1f}",
+                "MACD": "{:.3f}",
             }),
             use_container_width=True,
             hide_index=True,
@@ -1307,8 +1729,13 @@ if app_view == "Scanner Dashboard":
 
         signal_options = {}
         for _, signal_row in scan_frame.iterrows():
-            trigger_date = pd.Timestamp(signal_row["Trigger Date"]).strftime("%Y-%m-%d")
-            label = f"{signal_row['Ticker']} | {signal_row['Signal Type']} | {trigger_date}"
+            trigger_date = pd.Timestamp(signal_row["Trigger Date"]).strftime(
+                "%Y-%m-%d"
+            )
+            label = (
+                f"{signal_row['Ticker']} | {signal_row['Signal Type']} |"
+                f" {trigger_date}"
+            )
             if label in signal_options:
                 label += f" | ${signal_row['Price']:.2f}"
             signal_options[label] = signal_row.to_dict()
@@ -1330,26 +1757,62 @@ if symbol and app_view == "Stock Analysis":
             base_val = None
             z_score = None
             z_status = "N/A"
-            curr_price = info.get("currentPrice") or info.get("regularMarketPrice") or (df_hist["Close"].iloc[-1] if not df_hist.empty else 0.0)
+            curr_price = (
+                info.get("currentPrice")
+                or info.get("regularMarketPrice")
+                or (df_hist["Close"].iloc[-1] if not df_hist.empty else 0.0)
+            )
             price_low = info.get("fiftyTwoWeekLow")
             price_high = info.get("fiftyTwoWeekHigh")
-            analyst_target = info.get("targetMeanPrice") or info.get("targetMedianPrice")
-            implied_upside = ((analyst_target / curr_price) - 1) * 100 if analyst_target and curr_price else None
-            fundamental_cards = st.columns(4)
-            fundamental_cards[0].metric("Current Price", f"${curr_price:.2f}" if curr_price else "N/A")
-            fundamental_cards[1].metric(
-                "Trailing / Forward P/E",
-                f"{info.get('trailingPE') or float('nan'):.2f} / {info.get('forwardPE') or float('nan'):.2f}"
-                if info.get("trailingPE") or info.get("forwardPE") else "N/A",
+            analyst_target = info.get("targetMeanPrice") or info.get(
+                "targetMedianPrice"
             )
+            implied_upside = (
+                ((analyst_target / curr_price) - 1) * 100
+                if analyst_target and curr_price
+                else None
+            )
+
+            # Formatting Trailing & Forward P/E cleanly without nan
+            t_pe = info.get("trailingPE")
+            f_pe = info.get("forwardPE")
+            t_pe_str = (
+                f"{t_pe:.2f}"
+                if isinstance(t_pe, (int, float)) and pd.notna(t_pe)
+                else "N/A"
+            )
+            f_pe_str = (
+                f"{f_pe:.2f}"
+                if isinstance(f_pe, (int, float)) and pd.notna(f_pe)
+                else "N/A"
+            )
+            pe_card_display = (
+                f"{t_pe_str} / {f_pe_str}"
+                if (t_pe_str != "N/A" or f_pe_str != "N/A")
+                else "N/A"
+            )
+
+            fundamental_cards = st.columns(4)
+            fundamental_cards[0].metric(
+                "Current Price", f"${curr_price:.2f}" if curr_price else "N/A"
+            )
+            fundamental_cards[1].metric("Trailing / Forward P/E", pe_card_display)
             fundamental_cards[2].metric(
                 "52-Week Range",
-                f"${price_low:.2f} - ${price_high:.2f}" if price_low and price_high else "N/A",
+                (
+                    f"${price_low:.2f} - ${price_high:.2f}"
+                    if price_low and price_high
+                    else "N/A"
+                ),
             )
             fundamental_cards[3].metric(
                 "Analyst Target / Upside",
                 f"${analyst_target:.2f}" if analyst_target else "N/A",
-                delta=f"{implied_upside:+.1f}% implied upside" if implied_upside is not None else None,
+                delta=(
+                    f"{implied_upside:+.1f}% implied upside"
+                    if implied_upside is not None
+                    else None
+                ),
             )
             gunshot_signal = False
             trend_status = "資料不足 / 無法判斷"
@@ -1364,52 +1827,75 @@ if symbol and app_view == "Stock Analysis":
             rsi_value = np.nan
             rsi_div_type = "Neutral"
             rsi_divergences = []
-            bollinger_state = {"squeeze": False, "tag": "Neutral", "percent_b": np.nan, "bandwidth": np.nan}
+            bollinger_state = {
+                "squeeze": False,
+                "tag": "Neutral",
+                "percent_b": np.nan,
+                "bandwidth": np.nan,
+            }
             ma250_val = 0.0
             m10_val = m20_val = m55_val = curr_price
 
             # ==========================================
             # 1. 全球大盤情緒：VIX & CNN Fear and Greed 策略買點
             # ==========================================
-            st.subheader("🌐 1. 全球市場情緒與 VIX 抄底濾網 (Market Sentiment & VIX Filter)")
-            
+            st.subheader(
+                "🌐 1. 全球市場情緒與 VIX 抄底濾網 (Market Sentiment & VIX Filter)"
+            )
+
             vix_val = get_vix_value()
-            
+
             cnn_fng_val, cnn_fng_status = get_cnn_fear_and_greed()
 
             v1, v2, v3 = st.columns(3)
-            v1.metric("VIX 恐慌指數", f"{vix_val:.2f}", delta=">25 為極度恐慌" if vix_val > 25 else "正常區間")
+            v1.metric(
+                "VIX 恐慌指數",
+                f"{vix_val:.2f}",
+                delta=">25 為極度恐慌" if vix_val > 25 else "正常區間",
+            )
             cnn_display = (
                 f"{cnn_fng_val} ({cnn_fng_status})"
                 if cnn_fng_val is not None
                 else cnn_fng_status
             )
             v2.metric("CNN Fear & Greed Index", cnn_display)
-            
+
             buy_window = (
-                cnn_fng_val is not None
-                and vix_val >= 25
-                and cnn_fng_val <= 40
+                cnn_fng_val is not None and vix_val >= 25 and cnn_fng_val <= 40
             )
             if buy_window:
-                v3.success("🟢 **觸發黃金抄底訊號**：VIX > 25 且 CNN Fear & Greed < 40 (極度恐慌為長線建倉時機)！")
+                v3.success(
+                    "🟢 **觸發黃金抄底訊號**：VIX > 25 且 CNN Fear & Greed < 40"
+                    " (極度恐慌為長線建倉時機)！"
+                )
             else:
-                v3.info("🟡 **市場情緒平穩/偏熱**：未達到 VIX > 25 且 CNN F&G < 40 的黃金逆勢買點。")
+                v3.info(
+                    "🟡 **市場情緒平穩/偏熱**：未達到 VIX > 25 且 CNN F&G < 40"
+                    " 的黃金逆勢買點。"
+                )
 
             st.write("---")
 
             # ==========================================
             # 2. 精準細分產業、全方位財務比率 (Financial Ratios) 與基本面估值
             # ==========================================
-            st.subheader(f"🏛️ 2. {info.get('shortName', symbol)} ({symbol}) - 完整財務比率與基本面指標")
+            st.subheader(
+                f"🏛️ 2. {info.get('shortName', symbol)} ({symbol}) -"
+                " 完整財務比率與基本面指標"
+            )
 
             raw_industry = info.get("industry", "")
             raw_sector = info.get("sector", "")
-            ind_category_name, ind_benchmarks = get_granular_industry_benchmarks(raw_industry, raw_sector)
+            ind_category_name, ind_benchmarks = get_granular_industry_benchmarks(
+                raw_industry, raw_sector
+            )
 
             st.caption(
-                f"📌 **細分產業類別**：`{raw_industry or raw_sector}` ➔ 定義為 **{ind_category_name}**\n"
-                f"📊 **同業基準參考**：P/E: {ind_benchmarks['PE']}x | P/S: {ind_benchmarks['PS']}x | PEG: {ind_benchmarks['PEG']}x | 毛利率: {ind_benchmarks['GM']}% | 淨利率: {ind_benchmarks['NM']}% | ROE: {ind_benchmarks['ROE']}%"
+                f"📌 **細分產業類別**：`{raw_industry or raw_sector}` ➔ 定義為"
+                f" **{ind_category_name}**\n📊 **同業基準參考**：P/E:"
+                f" {ind_benchmarks['PE']}x | P/S: {ind_benchmarks['PS']}x | PEG:"
+                f" {ind_benchmarks['PEG']}x | 毛利率: {ind_benchmarks['GM']}% |"
+                f" 淨利率: {ind_benchmarks['NM']}% | ROE: {ind_benchmarks['ROE']}%"
             )
 
             if not bs.empty and not fin.empty:
@@ -1418,23 +1904,37 @@ if symbol and app_view == "Stock Analysis":
                     latest_fin = fin.iloc[:, 0]
 
                     total_assets = latest_bs.get("Total Assets", np.nan)
-                    total_liab = latest_bs.get("Total Liabilities Net Minority Interest", latest_bs.get("Total Liabilities", np.nan))
+                    total_liab = latest_bs.get(
+                        "Total Liabilities Net Minority Interest",
+                        latest_bs.get("Total Liabilities", np.nan),
+                    )
                     curr_assets = latest_bs.get("Current Assets", np.nan)
                     curr_liab = latest_bs.get("Current Liabilities", np.nan)
                     retained_earnings = latest_bs.get("Retained Earnings", 0)
-                    working_capital = (curr_assets - curr_liab) if pd.notna(curr_assets) and pd.notna(curr_liab) else np.nan
+                    working_capital = (
+                        (curr_assets - curr_liab)
+                        if pd.notna(curr_assets) and pd.notna(curr_liab)
+                        else np.nan
+                    )
                     ebit = latest_fin.get("EBIT", np.nan)
                     sales = latest_fin.get("Total Revenue", np.nan)
                     mkt_cap = info.get("marketCap", np.nan)
 
-                    if pd.notna(total_assets) and pd.notna(total_liab) and total_liab > 0 and pd.notna(working_capital):
+                    if (
+                        pd.notna(total_assets)
+                        and pd.notna(total_liab)
+                        and total_liab > 0
+                        and pd.notna(working_capital)
+                    ):
                         x1 = working_capital / total_assets
                         x2 = retained_earnings / total_assets
                         x3 = ebit / total_assets if pd.notna(ebit) else 0
                         x4 = mkt_cap / total_liab if pd.notna(mkt_cap) else 0
                         x5 = sales / total_assets if pd.notna(sales) else 0
 
-                        z_score = 1.2 * x1 + 1.4 * x2 + 3.3 * x3 + 0.6 * x4 + 0.999 * x5
+                        z_score = (
+                            1.2 * x1 + 1.4 * x2 + 3.3 * x3 + 0.6 * x4 + 0.999 * x5
+                        )
 
                         if z_score > 2.99:
                             z_status = f"{z_score:.2f} (🟢 安全)"
@@ -1447,40 +1947,105 @@ if symbol and app_view == "Stock Analysis":
 
             st.markdown("##### 📈 乘數與估值比率 (Valuation Multiples)")
             r1_1, r1_2, r1_3, r1_4, r1_5, r1_6 = st.columns(6)
-            pe_val = info.get('forwardPE') or info.get('trailingPE')
-            r1_1.metric("Forward P/E", f"{pe_val:.2f}" if pe_val else "N/A", delta=f"同業 {ind_benchmarks['PE']}x", delta_color="inverse" if pe_val and pe_val > ind_benchmarks['PE'] else "normal")
+            pe_val = info.get("forwardPE") or info.get("trailingPE")
+            r1_1.metric(
+                "Forward P/E",
+                f"{pe_val:.2f}" if pe_val else "N/A",
+                delta=f"同業 {ind_benchmarks['PE']}x",
+                delta_color=(
+                    "inverse" if pe_val and pe_val > ind_benchmarks["PE"] else "normal"
+                ),
+            )
 
-            ps_val = info.get('priceToSalesTrailing12Months')
-            r1_2.metric("P/S Ratio", f"{ps_val:.2f}" if ps_val else "N/A", delta=f"同業 {ind_benchmarks['PS']}x", delta_color="inverse" if ps_val and ps_val > ind_benchmarks['PS'] else "normal")
+            ps_val = info.get("priceToSalesTrailing12Months")
+            r1_2.metric(
+                "P/S Ratio",
+                f"{ps_val:.2f}" if ps_val else "N/A",
+                delta=f"同業 {ind_benchmarks['PS']}x",
+                delta_color=(
+                    "inverse" if ps_val and ps_val > ind_benchmarks["PS"] else "normal"
+                ),
+            )
 
-            r1_3.metric("P/B Ratio", f"{info.get('priceToBook', 0):.2f}" if info.get("priceToBook") else "N/A")
+            r1_3.metric(
+                "P/B Ratio",
+                f"{info.get('priceToBook', 0):.2f}"
+                if info.get("priceToBook")
+                else "N/A",
+            )
 
-            peg_val = info.get('pegRatio')
-            r1_4.metric("PEG Ratio", f"{peg_val:.2f}" if peg_val else "N/A", delta=f"同業 {ind_benchmarks['PEG']}x", delta_color="inverse" if peg_val and peg_val > ind_benchmarks['PEG'] else "normal")
+            peg_val = info.get("pegRatio")
+            r1_4.metric(
+                "PEG Ratio",
+                f"{peg_val:.2f}" if peg_val else "N/A",
+                delta=f"同業 {ind_benchmarks['PEG']}x",
+                delta_color=(
+                    "inverse"
+                    if peg_val and peg_val > ind_benchmarks["PEG"]
+                    else "normal"
+                ),
+            )
 
-            r1_5.metric("Quick Ratio", f"{info.get('quickRatio', 0):.2f}" if info.get("quickRatio") else "N/A")
+            r1_5.metric(
+                "Quick Ratio",
+                f"{info.get('quickRatio', 0):.2f}"
+                if info.get("quickRatio")
+                else "N/A",
+            )
             r1_6.metric("Altman Z-Score", z_status)
 
             st.markdown("##### 💵 獲利能力比率 (Profitability & Margins)")
             r2_1, r2_2, r2_3, r2_4, r2_5 = st.columns(5)
 
-            gm_val = info.get('grossMargins')
+            gm_val = info.get("grossMargins")
             gm_disp = f"{gm_val * 100:.2f}%" if gm_val else "N/A"
-            r2_1.metric("毛利率 (Gross Margin)", gm_disp, delta=f"同業 {ind_benchmarks['GM']}%", delta_color="normal" if gm_val and gm_val * 100 > ind_benchmarks['GM'] else "inverse")
+            r2_1.metric(
+                "毛利率 (Gross Margin)",
+                gm_disp,
+                delta=f"同業 {ind_benchmarks['GM']}%",
+                delta_color=(
+                    "normal"
+                    if gm_val and gm_val * 100 > ind_benchmarks["GM"]
+                    else "inverse"
+                ),
+            )
 
-            op_val = info.get('operatingMargins')
-            r2_2.metric("營業利益率 (Op Margin)", f"{op_val * 100:.2f}%" if op_val else "N/A")
+            op_val = info.get("operatingMargins")
+            r2_2.metric(
+                "營業利益率 (Op Margin)",
+                f"{op_val * 100:.2f}%" if op_val else "N/A",
+            )
 
-            nm_val = info.get('profitMargins')
+            nm_val = info.get("profitMargins")
             nm_disp = f"{nm_val * 100:.2f}%" if nm_val else "N/A"
-            r2_3.metric("淨利率 (Net Margin)", nm_disp, delta=f"同業 {ind_benchmarks['NM']}%", delta_color="normal" if nm_val and nm_val * 100 > ind_benchmarks['NM'] else "inverse")
+            r2_3.metric(
+                "淨利率 (Net Margin)",
+                nm_disp,
+                delta=f"同業 {ind_benchmarks['NM']}%",
+                delta_color=(
+                    "normal"
+                    if nm_val and nm_val * 100 > ind_benchmarks["NM"]
+                    else "inverse"
+                ),
+            )
 
-            roe_val = info.get('returnOnEquity')
+            roe_val = info.get("returnOnEquity")
             roe_disp = f"{roe_val * 100:.2f}%" if roe_val else "N/A"
-            r2_4.metric("股東權益報酬率 (ROE)", roe_disp, delta=f"同業 {ind_benchmarks['ROE']}%", delta_color="normal" if roe_val and roe_val * 100 > ind_benchmarks['ROE'] else "inverse")
+            r2_4.metric(
+                "股東權益報酬率 (ROE)",
+                roe_disp,
+                delta=f"同業 {ind_benchmarks['ROE']}%",
+                delta_color=(
+                    "normal"
+                    if roe_val and roe_val * 100 > ind_benchmarks["ROE"]
+                    else "inverse"
+                ),
+            )
 
-            roa_val = info.get('returnOnAssets')
-            r2_5.metric("資產報酬率 (ROA)", f"{roa_val * 100:.2f}%" if roa_val else "N/A")
+            roa_val = info.get("returnOnAssets")
+            r2_5.metric(
+                "資產報酬率 (ROA)", f"{roa_val * 100:.2f}%" if roa_val else "N/A"
+            )
 
             # ==========================================
             # 3. DCF 現金流折現估值模型 (Pragmatic 5-Year FCFF Model)
@@ -1497,10 +2062,21 @@ if symbol and app_view == "Stock Analysis":
             if not q_cf.empty:
                 try:
                     q_cf_t = q_cf.T.head(4)
-                    if "Free Cash Flow" in q_cf_t.columns and q_cf_t["Free Cash Flow"].notna().sum() == 4:
+                    if (
+                        "Free Cash Flow" in q_cf_t.columns
+                        and q_cf_t["Free Cash Flow"].notna().sum() == 4
+                    ):
                         ttm_fcf = float(q_cf_t["Free Cash Flow"].sum())
-                    elif "Operating Cash Flow" in q_cf_t.columns and "Capital Expenditure" in q_cf_t.columns:
-                        ttm_fcf = float((q_cf_t["Operating Cash Flow"] + q_cf_t["Capital Expenditure"]).sum())
+                    elif (
+                        "Operating Cash Flow" in q_cf_t.columns
+                        and "Capital Expenditure" in q_cf_t.columns
+                    ):
+                        ttm_fcf = float(
+                            (
+                                q_cf_t["Operating Cash Flow"]
+                                + q_cf_t["Capital Expenditure"]
+                            ).sum()
+                        )
                 except Exception:
                     ttm_fcf = None
 
@@ -1509,9 +2085,14 @@ if symbol and app_view == "Stock Analysis":
             if not cf_df.empty:
                 for col in cf_df.columns:
                     val = None
-                    if "Free Cash Flow" in cf_df.index and pd.notna(cf_df.loc["Free Cash Flow", col]):
+                    if "Free Cash Flow" in cf_df.index and pd.notna(
+                        cf_df.loc["Free Cash Flow", col]
+                    ):
                         val = cf_df.loc["Free Cash Flow", col]
-                    elif "Operating Cash Flow" in cf_df.index and "Capital Expenditure" in cf_df.index:
+                    elif (
+                        "Operating Cash Flow" in cf_df.index
+                        and "Capital Expenditure" in cf_df.index
+                    ):
                         ocf = cf_df.loc["Operating Cash Flow", col]
                         capex = cf_df.loc["Capital Expenditure", col]
                         if pd.notna(ocf) and pd.notna(capex):
@@ -1532,11 +2113,22 @@ if symbol and app_view == "Stock Analysis":
                     tot_debt = latest_bs.get("Total Debt", None)
                     if pd.isna(tot_debt) or tot_debt is None:
                         lt_debt = latest_bs.get("Long Term Debt", 0)
-                        st_debt = latest_bs.get("Current Debt And Capital Lease Obligation", latest_bs.get("Current Debt", 0))
-                        tot_debt = (lt_debt if pd.notna(lt_debt) else 0) + (st_debt if pd.notna(st_debt) else 0)
+                        st_debt = latest_bs.get(
+                            "Current Debt And Capital Lease Obligation",
+                            latest_bs.get("Current Debt", 0),
+                        )
+                        tot_debt = (lt_debt if pd.notna(lt_debt) else 0) + (
+                            st_debt if pd.notna(st_debt) else 0
+                        )
 
-                    cash = latest_bs.get("Cash And Cash Equivalents", latest_bs.get("Cash Cash Equivalents And Short Term Investments", info.get("cash", 0)))
-                    
+                    cash = latest_bs.get(
+                        "Cash And Cash Equivalents",
+                        latest_bs.get(
+                            "Cash Cash Equivalents And Short Term Investments",
+                            info.get("cash", 0),
+                        ),
+                    )
+
                     if pd.notna(tot_debt):
                         total_debt = float(tot_debt)
                         cash_val = float(cash) if pd.notna(cash) else 0.0
@@ -1554,15 +2146,19 @@ if symbol and app_view == "Stock Analysis":
                 total_capital = mkt_cap_val + total_debt
                 weight_e = mkt_cap_val / total_capital
                 weight_d = total_debt / total_capital
-                calc_wacc = (weight_e * cost_of_equity) + (weight_d * cost_of_debt * 0.79)
+                calc_wacc = (weight_e * cost_of_equity) + (
+                    weight_d * cost_of_debt * 0.79
+                )
                 discount_rate = calc_wacc
                 wacc_label = f"WACC {discount_rate*100:.2f}% (Rf: {rf_rate*100:.2f}%)"
             else:
                 discount_rate = cost_of_equity
-                wacc_label = f"Cost of Equity {discount_rate*100:.2f}% (Rf: {rf_rate*100:.2f}%)"
+                wacc_label = (
+                    f"Cost of Equity {discount_rate*100:.2f}% (Rf:"
+                    f" {rf_rate*100:.2f}%)"
+                )
 
             def normalize_absolute_dollars(value, reference_market_cap):
-                """Convert provider values reported in millions to absolute dollars for mega-caps."""
                 if value is None or pd.isna(value):
                     return 0.0
                 amount = float(value)
@@ -1571,26 +2167,53 @@ if symbol and app_view == "Stock Analysis":
                 return amount
 
             mkt_cap_val = float(info.get("marketCap", 0) or 0.0)
-            fcf_history = [normalize_absolute_dollars(value, mkt_cap_val) for value in fcf_history]
+            fcf_history = [
+                normalize_absolute_dollars(value, mkt_cap_val)
+                for value in fcf_history
+            ]
             ttm_fcf = normalize_absolute_dollars(ttm_fcf, mkt_cap_val)
             total_debt = normalize_absolute_dollars(total_debt, mkt_cap_val)
             cash_val = normalize_absolute_dollars(cash_val, mkt_cap_val)
             net_debt = total_debt - cash_val
 
             valid_fcfs = [f for f in fcf_history if f > 0]
-            dated_fcf = sorted(zip(fcf_dates, fcf_history), key=lambda item: item[0]) if fcf_dates else []
-            chronological_fcf = [float(value) for _, value in dated_fcf if pd.notna(value)]
-            latest_annual_fcf = chronological_fcf[-1] if chronological_fcf and chronological_fcf[-1] > 0 else None
-            historical_fcf_average = float(np.mean([value for value in chronological_fcf[-3:] if value > 0])) if chronological_fcf else 0.0
-            latest_fcf = latest_annual_fcf or (ttm_fcf if ttm_fcf > 0 else (valid_fcfs[-1] if valid_fcfs else 0.0))
+            dated_fcf = (
+                sorted(zip(fcf_dates, fcf_history), key=lambda item: item[0])
+                if fcf_dates
+                else []
+            )
+            chronological_fcf = [
+                float(value) for _, value in dated_fcf if pd.notna(value)
+            ]
+            latest_annual_fcf = (
+                chronological_fcf[-1]
+                if chronological_fcf and chronological_fcf[-1] > 0
+                else None
+            )
+            historical_fcf_average = (
+                float(np.mean([value for value in chronological_fcf[-3:] if value > 0]))
+                if chronological_fcf
+                else 0.0
+            )
+            latest_fcf = latest_annual_fcf or (
+                ttm_fcf
+                if ttm_fcf > 0
+                else (valid_fcfs[-1] if valid_fcfs else 0.0)
+            )
 
             latest_net_income = 0.0
             if not fin.empty:
                 for income_name in ["Net Income", "Net Income Common Stockholders"]:
                     if income_name in fin.index:
-                        income_values = pd.to_numeric(fin.loc[income_name], errors="coerce").dropna().tolist()
+                        income_values = (
+                            pd.to_numeric(fin.loc[income_name], errors="coerce")
+                            .dropna()
+                            .tolist()
+                        )
                         if income_values:
-                            latest_net_income = normalize_absolute_dollars(float(income_values[0]), mkt_cap_val)
+                            latest_net_income = normalize_absolute_dollars(
+                                float(income_values[0]), mkt_cap_val
+                            )
                             break
 
             smoothed_fcf = historical_fcf_average
@@ -1602,20 +2225,35 @@ if symbol and app_view == "Stock Analysis":
                 base_fcf = latest_fcf or smoothed_fcf
 
             if base_fcf > 0 and shares_out > 0:
-                industry_growth = get_industry_growth_profile(raw_industry, raw_sector)
-                fcf_growth_anchor, recent_fcf_growth, fcf_growth_slope = estimate_fcf_growth_anchor(
+                industry_growth = get_industry_growth_profile(
+                    raw_industry, raw_sector
+                )
+                (
+                    fcf_growth_anchor,
+                    recent_fcf_growth,
+                    fcf_growth_slope,
+                ) = estimate_fcf_growth_anchor(
                     fcf_history, industry_growth, fcf_dates
                 )
-                net_income_growth_anchor = estimate_net_income_growth_anchor(fin, info)
+                net_income_growth_anchor = estimate_net_income_growth_anchor(
+                    fin, info
+                )
                 revenue_growth_anchor = get_revenue_growth_anchor(info)
                 annual_revenue = normalize_absolute_dollars(
-                    info.get("totalRevenue") or info.get("revenue") or 0.0, mkt_cap_val
+                    info.get("totalRevenue") or info.get("revenue") or 0.0,
+                    mkt_cap_val,
                 )
                 if not annual_revenue and not fin.empty:
                     for revenue_name in ["Total Revenue", "Operating Revenue"]:
                         if revenue_name in fin.index:
                             annual_revenue = normalize_absolute_dollars(
-                                float(pd.to_numeric(fin.loc[revenue_name], errors="coerce").dropna().iloc[0]),
+                                float(
+                                    pd.to_numeric(
+                                        fin.loc[revenue_name], errors="coerce"
+                                    )
+                                    .dropna()
+                                    .iloc[0]
+                                ),
                                 mkt_cap_val,
                             )
                             break
@@ -1623,21 +2261,30 @@ if symbol and app_view == "Stock Analysis":
                 fcf_margin = base_fcf / annual_revenue if annual_revenue > 0 else 0.0
                 latest_capex = 0.0
                 if not cf_df.empty and "Capital Expenditure" in cf_df.index:
-                    capex_values = pd.to_numeric(cf_df.loc["Capital Expenditure"], errors="coerce").dropna()
+                    capex_values = pd.to_numeric(
+                        cf_df.loc["Capital Expenditure"], errors="coerce"
+                    ).dropna()
                     if not capex_values.empty:
                         latest_capex = abs(float(capex_values.iloc[0]))
-                capex_intensity = latest_capex / annual_revenue if annual_revenue > 0 else 0.0
-                negative_fcf_trend = bool(fcf_growth_slope < -0.10 or (recent_fcf_growth and recent_fcf_growth[-1] < -0.20))
+                capex_intensity = (
+                    latest_capex / annual_revenue if annual_revenue > 0 else 0.0
+                )
+                negative_fcf_trend = bool(
+                    fcf_growth_slope < -0.10
+                    or (recent_fcf_growth and recent_fcf_growth[-1] < -0.20)
+                )
                 investment_heavy_growth = bool(
                     mkt_cap_val >= 10_000_000_000
                     and capex_intensity >= 0.10
                     and (net_income_growth_anchor or 0.0) > 0.0
                     and (revenue_growth_anchor or 0.0) > 0.05
                 )
-                lifecycle, weights, growth_floor, terminal_g = classify_corporate_lifecycle(
-                    revenue_growth_anchor or 0.0,
-                    fcf_margin,
-                    negative_fcf_trend and not investment_heavy_growth,
+                lifecycle, weights, growth_floor, terminal_g = (
+                    classify_corporate_lifecycle(
+                        revenue_growth_anchor or 0.0,
+                        fcf_margin,
+                        negative_fcf_trend and not investment_heavy_growth,
+                    )
                 )
 
                 lifecycle_growth_ceiling = {
@@ -1647,10 +2294,19 @@ if symbol and app_view == "Stock Analysis":
                     "Dog": 0.12,
                 }.get(lifecycle, 0.25)
 
-                signals = {"fcf": fcf_growth_anchor, "net_income": net_income_growth_anchor, "revenue": revenue_growth_anchor}
+                signals = {
+                    "fcf": fcf_growth_anchor,
+                    "net_income": net_income_growth_anchor,
+                    "revenue": revenue_growth_anchor,
+                }
                 if investment_heavy_growth and signals["fcf"] is not None:
                     signals["fcf"] = max(float(signals["fcf"]), 0.0)
-                weights, company_size, earnings_outpace_fcf, high_capex = adjust_growth_weights_for_scale(
+                (
+                    weights,
+                    company_size,
+                    earnings_outpace_fcf,
+                    high_capex,
+                ) = adjust_growth_weights_for_scale(
                     weights,
                     mkt_cap_val,
                     net_income_growth_anchor,
@@ -1664,69 +2320,48 @@ if symbol and app_view == "Stock Analysis":
                 }
                 available_weight = sum(weights[key] for key in clamped_signals)
                 growth_est = (
-                    sum(clamped_signals[key] * weights[key] for key in clamped_signals) / available_weight
-                    if available_weight > 0 else 0.0
+                    sum(clamped_signals[key] * weights[key] for key in clamped_signals)
+                    / available_weight
+                    if available_weight > 0
+                    else 0.0
                 )
                 growth_est = max(growth_floor, min(growth_est, lifecycle_growth_ceiling))
                 company_ceiling = lifecycle_growth_ceiling
 
-                def build_stage_growth_schedule(base_growth, style):
-                    """Build a five-year high-growth fade while preserving the life-cycle floor."""
-                    base_growth = max(growth_floor, min(float(base_growth), company_ceiling))
-                    slope_effect = max(-0.08, min(float(fcf_growth_slope), 0.08))
-                    if style == "pess":
-                        multipliers = [0.85, 0.75, 0.65, 0.55, 0.45]
-                    elif style == "opt":
-                        multipliers = [1.15, 1.05, 0.95, 0.85, 0.75]
-                    else:
-                        multipliers = [1.00, 0.95, 0.85, 0.75, 0.65]
-                    growth_schedule = [
-                        max(growth_floor, min(base_growth * multiplier + slope_effect * (index / 4), company_ceiling))
-                        for index, multiplier in enumerate(multipliers)
-                    ]
-                    return growth_schedule, terminal_g
-
-                def run_multistage_dcf(b_fcf, growth_schedule, disc_r, term_g):
-                    """Calculate DCF using absolute-dollar FCF, debt, cash, and shares throughout."""
-                    disc_r = float(disc_r)
-                    if disc_r > 1.0:
-                        disc_r /= 100.0
-                    disc_r = max(0.01, min(disc_r, 0.50))
-                    safe_term_g = min(float(term_g), disc_r - 0.005)
-                    safe_term_g = max(0.0, safe_term_g)
-                    fcfs, pvs = [], []
-                    fcf = float(b_fcf)
-                    for yr, growth in enumerate(growth_schedule, start=1):
-                        fcf *= 1.0 + float(growth)
-                        fcfs.append(fcf)
-                        pvs.append(fcf / ((1.0 + disc_r) ** yr))
-                    terminal_val = (fcfs[-1] * (1.0 + safe_term_g)) / (disc_r - safe_term_g)
-                    terminal_val *= market_multiple_factor
-                    pv_terminal = terminal_val / ((1.0 + disc_r) ** len(growth_schedule))
-                    enterprise_value = sum(pvs) + pv_terminal
-                    equity_value = max(enterprise_value + cash_val - total_debt, 0.0)
-                    intrinsic_value_per_share = equity_value / float(shares_out)
-                    return intrinsic_value_per_share, fcfs, pvs, terminal_val, pv_terminal, enterprise_value, equity_value
-
                 pe_implied_value = (
                     latest_net_income * float(ind_benchmarks["PE"]) / float(shares_out)
-                    if latest_net_income > 0 and shares_out > 0 else None
+                    if latest_net_income > 0 and shares_out > 0
+                    else None
                 )
                 ps_implied_value = (
                     annual_revenue * float(ind_benchmarks["PS"]) / float(shares_out)
-                    if annual_revenue > 0 and shares_out > 0 else None
+                    if annual_revenue > 0 and shares_out > 0
+                    else None
                 )
 
                 observed_multiple_premiums = []
                 observed_pe = info.get("forwardPE") or info.get("trailingPE")
                 observed_ps = info.get("priceToSalesTrailing12Months")
-                if isinstance(observed_pe, (int, float)) and pd.notna(observed_pe) and observed_pe > 0:
-                    observed_multiple_premiums.append(float(observed_pe) / float(ind_benchmarks["PE"]))
-                if isinstance(observed_ps, (int, float)) and pd.notna(observed_ps) and observed_ps > 0:
-                    observed_multiple_premiums.append(float(observed_ps) / float(ind_benchmarks["PS"]))
+                if (
+                    isinstance(observed_pe, (int, float))
+                    and pd.notna(observed_pe)
+                    and observed_pe > 0
+                ):
+                    observed_multiple_premiums.append(
+                        float(observed_pe) / float(ind_benchmarks["PE"])
+                    )
+                if (
+                    isinstance(observed_ps, (int, float))
+                    and pd.notna(observed_ps)
+                    and observed_ps > 0
+                ):
+                    observed_multiple_premiums.append(
+                        float(observed_ps) / float(ind_benchmarks["PS"])
+                    )
                 market_multiple_factor = (
                     max(0.75, min(float(np.mean(observed_multiple_premiums)), 1.50))
-                    if observed_multiple_premiums else 1.0
+                    if observed_multiple_premiums
+                    else 1.0
                 )
                 if pe_implied_value is not None:
                     pe_implied_value *= market_multiple_factor
@@ -1743,13 +2378,23 @@ if symbol and app_view == "Stock Analysis":
                     valuation_weights = {"dcf": 0.50, "pe": 0.35, "ps": 0.15}
 
                 def blend_valuation(dcf_value):
-                    """Blend intrinsic DCF value with earnings and sales cross-checks."""
-                    values = {"dcf": dcf_value, "pe": pe_implied_value, "ps": ps_implied_value}
-                    available = {key: value for key, value in values.items() if value is not None and value >= 0}
+                    values = {
+                        "dcf": dcf_value,
+                        "pe": pe_implied_value,
+                        "ps": ps_implied_value,
+                    }
+                    available = {
+                        key: value
+                        for key, value in values.items()
+                        if value is not None and value >= 0
+                    }
                     weight_total = sum(valuation_weights[key] for key in available)
                     if weight_total <= 0:
                         return max(float(dcf_value), 0.0)
-                    return sum(available[key] * valuation_weights[key] for key in available) / weight_total
+                    return (
+                        sum(available[key] * valuation_weights[key] for key in available)
+                        / weight_total
+                    )
 
                 target_net_margin = (
                     latest_net_income / annual_revenue
@@ -1761,27 +2406,49 @@ if symbol and app_view == "Stock Analysis":
                     if latest_net_income > 0 and base_fcf > 0
                     else 0.80
                 )
-                cash_flow_conversion_rate = max(0.50, min(cash_flow_conversion_rate, 1.50))
-                exit_multiple = max(8.0, min(float(ind_benchmarks["PE"]) * market_multiple_factor, 45.0))
+                cash_flow_conversion_rate = max(
+                    0.50, min(cash_flow_conversion_rate, 1.50)
+                )
+                exit_multiple = max(
+                    8.0, min(float(ind_benchmarks["PE"]) * market_multiple_factor, 45.0)
+                )
                 forecast_period = 10
 
                 base_growth_rate = growth_est
                 pess_growth_rate = max(growth_floor, growth_est - 0.05)
                 opt_growth_rate = min(company_ceiling, growth_est + 0.05)
                 base_fcfe_result = calculate_fcfe_dcf(
-                    curr_price, annual_revenue, base_growth_rate, target_net_margin,
-                    cash_flow_conversion_rate, forecast_period, discount_rate,
-                    exit_multiple, shares_out,
+                    curr_price,
+                    annual_revenue,
+                    base_growth_rate,
+                    target_net_margin,
+                    cash_flow_conversion_rate,
+                    forecast_period,
+                    discount_rate,
+                    exit_multiple,
+                    shares_out,
                 )
                 pess_fcfe_result = calculate_fcfe_dcf(
-                    curr_price, annual_revenue, pess_growth_rate, target_net_margin,
-                    cash_flow_conversion_rate, forecast_period, discount_rate + 0.01,
-                    exit_multiple * 0.90, shares_out,
+                    curr_price,
+                    annual_revenue,
+                    pess_growth_rate,
+                    target_net_margin,
+                    cash_flow_conversion_rate,
+                    forecast_period,
+                    discount_rate + 0.01,
+                    exit_multiple * 0.90,
+                    shares_out,
                 )
                 opt_fcfe_result = calculate_fcfe_dcf(
-                    curr_price, annual_revenue, opt_growth_rate, target_net_margin,
-                    cash_flow_conversion_rate, forecast_period, max(discount_rate - 0.008, 0.05),
-                    exit_multiple * 1.10, shares_out,
+                    curr_price,
+                    annual_revenue,
+                    opt_growth_rate,
+                    target_net_margin,
+                    cash_flow_conversion_rate,
+                    forecast_period,
+                    max(discount_rate - 0.008, 0.05),
+                    exit_multiple * 1.10,
+                    shares_out,
                 )
 
                 base_schedule = [base_growth_rate] * 5
@@ -1795,8 +2462,13 @@ if symbol and app_view == "Stock Analysis":
                 pess_val = blend_valuation(pess_dcf_val)
                 opt_val = blend_valuation(opt_dcf_val)
 
-                base_fcfs = [row["FCFE"] for row in base_fcfe_result["yearlyProjections"][:5]]
-                base_pvs = [row["Present Value"] for row in base_fcfe_result["yearlyProjections"][:5]]
+                base_fcfs = [
+                    row["FCFE"] for row in base_fcfe_result["yearlyProjections"][:5]
+                ]
+                base_pvs = [
+                    row["Present Value"]
+                    for row in base_fcfe_result["yearlyProjections"][:5]
+                ]
                 base_tv = base_fcfe_result["terminalValue"]
                 base_pv_tv = base_fcfe_result["presentValueTerminal"]
                 base_ev = base_fcfe_result["totalPresentValue"]
@@ -1804,38 +2476,97 @@ if symbol and app_view == "Stock Analysis":
 
                 pess_discount = discount_rate + 0.01
                 opt_discount = max(discount_rate - 0.008, 0.05)
-                pess_fcfs = [row["FCFE"] for row in pess_fcfe_result["yearlyProjections"][:5]]
-                pess_pvs = [row["Present Value"] for row in pess_fcfe_result["yearlyProjections"][:5]]
+                pess_fcfs = [
+                    row["FCFE"] for row in pess_fcfe_result["yearlyProjections"][:5]
+                ]
+                pess_pvs = [
+                    row["Present Value"]
+                    for row in pess_fcfe_result["yearlyProjections"][:5]
+                ]
                 pess_tv = pess_fcfe_result["terminalValue"]
                 pess_pv_tv = pess_fcfe_result["presentValueTerminal"]
                 pess_ev = pess_fcfe_result["totalPresentValue"]
                 pess_eq = pess_ev
-                opt_fcfs = [row["FCFE"] for row in opt_fcfe_result["yearlyProjections"][:5]]
-                opt_pvs = [row["Present Value"] for row in opt_fcfe_result["yearlyProjections"][:5]]
+                opt_fcfs = [
+                    row["FCFE"] for row in opt_fcfe_result["yearlyProjections"][:5]
+                ]
+                opt_pvs = [
+                    row["Present Value"]
+                    for row in opt_fcfe_result["yearlyProjections"][:5]
+                ]
                 opt_tv = opt_fcfe_result["terminalValue"]
                 opt_pv_tv = opt_fcfe_result["presentValueTerminal"]
                 opt_ev = opt_fcfe_result["totalPresentValue"]
                 opt_eq = opt_ev
 
                 dcf_col1, dcf_col2, dcf_col3, dcf_col4 = st.columns(4)
-                dcf_col1.metric("🔴 保守情境估值", f"${pess_val:.2f}", help=f"成長階段: {', '.join(f'{g*100:.1f}%' for g in pess_schedule)}% | 折現率: {pess_discount*100:.1f}% | 終值成長: {pess_term_g*100:.1f}%")
-                dcf_col2.metric("🟡 基準情境估值", f"${base_val:.2f}", help=f"成長階段: {', '.join(f'{g*100:.1f}%' for g in base_schedule)}% | 折現率: {discount_rate*100:.1f}% | 終值成長: {base_term_g*100:.1f}%")
-                dcf_col3.metric("🟢 樂觀情境估值", f"${opt_val:.2f}", help=f"成長階段: {', '.join(f'{g*100:.1f}%' for g in opt_schedule)}% | 折現率: {opt_discount*100:.1f}% | 終值成長: {opt_term_g*100:.1f}%")
+                dcf_col1.metric(
+                    "🔴 保守情境估值",
+                    f"${pess_val:.2f}",
+                    help=(
+                        f"成長階段: {', '.join(f'{g*100:.1f}%' for g in pess_schedule)}%"
+                        f" | 折現率: {pess_discount*100:.1f}% | 終值成長:"
+                        f" {pess_term_g*100:.1f}%"
+                    ),
+                )
+                dcf_col2.metric(
+                    "🟡 基準情境估值",
+                    f"${base_val:.2f}",
+                    help=(
+                        f"成長階段: {', '.join(f'{g*100:.1f}%' for g in base_schedule)}%"
+                        f" | 折現率: {discount_rate*100:.1f}% | 終值成長:"
+                        f" {base_term_g*100:.1f}%"
+                    ),
+                )
+                dcf_col3.metric(
+                    "🟢 樂觀情境估值",
+                    f"${opt_val:.2f}",
+                    help=(
+                        f"成長階段: {', '.join(f'{g*100:.1f}%' for g in opt_schedule)}%"
+                        f" | 折現率: {opt_discount*100:.1f}% | 終值成長:"
+                        f" {opt_term_g*100:.1f}%"
+                    ),
+                )
 
-                margin_of_safety = ((base_val - curr_price) / base_val) * 100 if base_val > 0 else 0
-                dcf_col4.metric("當前股價 / 安全邊際", f"${curr_price:.2f}", delta=f"安全邊際: {margin_of_safety:.1f}%")
+                margin_of_safety = (
+                    ((base_val - curr_price) / base_val) * 100 if base_val > 0 else 0
+                )
+                dcf_col4.metric(
+                    "當前股價 / 安全邊際",
+                    f"${curr_price:.2f}",
+                    delta=f"安全邊際: {margin_of_safety:.1f}%",
+                )
 
                 st.write({
                     "Classification Stage": lifecycle,
                     "Company Size Benchmark": company_size,
-                    "AI/Investment Capex Intensity (%)": round(capex_intensity * 100, 2),
+                    "AI/Investment Capex Intensity (%)": round(
+                        capex_intensity * 100, 2
+                    ),
                     "Investment-Heavy Growth Treatment": investment_heavy_growth,
                     "Net Income Growth > FCF Growth": earnings_outpace_fcf,
-                    "Growth Weights (FCF/NI/Revenue)": f"{weights['fcf']:.0%} / {weights['net_income']:.0%} / {weights['revenue']:.0%}",
-                    "Valuation Weights (DCF/PE/PS)": f"{valuation_weights['dcf']:.0%} / {valuation_weights['pe']:.0%} / {valuation_weights['ps']:.0%}",
-                    "Market Multiple Premium Factor": round(market_multiple_factor, 3),
-                    "P/E Implied Value ($/share)": round(pe_implied_value, 2) if pe_implied_value is not None else None,
-                    "P/S Implied Value ($/share)": round(ps_implied_value, 2) if ps_implied_value is not None else None,
+                    "Growth Weights (FCF/NI/Revenue)": (
+                        f"{weights['fcf']:.0%} / {weights['net_income']:.0%} /"
+                        f" {weights['revenue']:.0%}"
+                    ),
+                    "Valuation Weights (DCF/PE/PS)": (
+                        f"{valuation_weights['dcf']:.0%} /"
+                        f" {valuation_weights['pe']:.0%} /"
+                        f" {valuation_weights['ps']:.0%}"
+                    ),
+                    "Market Multiple Premium Factor": round(
+                        market_multiple_factor, 3
+                    ),
+                    "P/E Implied Value ($/share)": (
+                        round(pe_implied_value, 2)
+                        if pe_implied_value is not None
+                        else None
+                    ),
+                    "P/S Implied Value ($/share)": (
+                        round(ps_implied_value, 2)
+                        if ps_implied_value is not None
+                        else None
+                    ),
                     "Blended Growth Anchor (%)": round(growth_est * 100, 2),
                     "Starting FCF Base ($)": round(base_fcf, 2),
                     "Discount Rate Used (r)": round(discount_rate, 6),
@@ -1845,19 +2576,75 @@ if symbol and app_view == "Stock Analysis":
                 })
 
                 scenario_details = [
-                    ("🔴 保守情境計算明細", pess_schedule, pess_discount, pess_term_g, pess_val, pess_fcfs, pess_pvs, pess_tv, pess_pv_tv, pess_ev, pess_eq),
-                    ("🟡 基準情境計算明細", base_schedule, discount_rate, base_term_g, base_val, base_fcfs, base_pvs, base_tv, base_pv_tv, base_ev, base_eq),
-                    ("🟢 樂觀情境計算明細", opt_schedule, opt_discount, opt_term_g, opt_val, opt_fcfs, opt_pvs, opt_tv, opt_pv_tv, opt_ev, opt_eq),
+                    (
+                        "🔴 保守情境計算明細",
+                        pess_schedule,
+                        pess_discount,
+                        pess_term_g,
+                        pess_val,
+                        pess_fcfs,
+                        pess_pvs,
+                        pess_tv,
+                        pess_pv_tv,
+                        pess_ev,
+                        pess_eq,
+                    ),
+                    (
+                        "🟡 基準情境計算明細",
+                        base_schedule,
+                        discount_rate,
+                        base_term_g,
+                        base_val,
+                        base_fcfs,
+                        base_pvs,
+                        base_tv,
+                        base_pv_tv,
+                        base_ev,
+                        base_eq,
+                    ),
+                    (
+                        "🟢 樂觀情境計算明細",
+                        opt_schedule,
+                        opt_discount,
+                        opt_term_g,
+                        opt_val,
+                        opt_fcfs,
+                        opt_pvs,
+                        opt_tv,
+                        opt_pv_tv,
+                        opt_ev,
+                        opt_eq,
+                    ),
                 ]
 
-                for scenario_title, scenario_growth_schedule, scenario_discount, scenario_terminal_growth, scenario_value, scenario_fcfs, scenario_pvs, scenario_tv, scenario_pv_tv, scenario_ev, scenario_eq in scenario_details:
+                for (
+                    scenario_title,
+                    scenario_growth_schedule,
+                    scenario_discount,
+                    scenario_terminal_growth,
+                    scenario_value,
+                    scenario_fcfs,
+                    scenario_pvs,
+                    scenario_tv,
+                    scenario_pv_tv,
+                    scenario_ev,
+                    scenario_eq,
+                ) in scenario_details:
                     with st.expander(f"🧮 {scenario_title}"):
-                        stage_text = ", ".join(f"Y{idx}={g * 100:.1f}%" for idx, g in enumerate(scenario_growth_schedule, start=1))
+                        stage_text = ", ".join(
+                            f"Y{idx}={g * 100:.1f}%"
+                            for idx, g in enumerate(
+                                scenario_growth_schedule, start=1
+                            )
+                        )
                         st.caption(
-                            f"假設：基準營收 ${annual_revenue / 1e9:.2f}B | 10年 FCFE 成長率: {stage_text} | "
-                            f"折現率 {scenario_discount * 100:.2f}% | FCFE 轉換率 {cash_flow_conversion_rate * 100:.1f}% | "
-                            f"退出倍數 {exit_multiple:.1f}x | "
-                            f"淨債務 ${net_debt / 1e9:.2f}B | 流通股數 {shares_out / 1e9:.2f}B"
+                            f"假設：基準營收 ${annual_revenue / 1e9:.2f}B | 10年 FCFE"
+                            f" 成長率: {stage_text} | 折現率"
+                            f" {scenario_discount * 100:.2f}% | FCFE 轉換率"
+                            f" {cash_flow_conversion_rate * 100:.1f}% | 退出倍數"
+                            f" {exit_multiple:.1f}x | 淨債務"
+                            f" ${net_debt / 1e9:.2f}B | 流通股數"
+                            f" {shares_out / 1e9:.2f}B"
                         )
                         assumptions = pd.DataFrame({
                             "模型假設": [
@@ -1881,20 +2668,29 @@ if symbol and app_view == "Stock Analysis":
                                 f"{cash_flow_conversion_rate * 100:.2f}%",
                                 f"{exit_multiple:.2f}x",
                                 f"{scenario_discount * 100:.2f}%",
-                                f"{rf_rate * 100:.2f}% / {beta:.2f} / {erp * 100:.2f}%",
+                                (
+                                    f"{rf_rate * 100:.2f}% / {beta:.2f} /"
+                                    f" {erp * 100:.2f}%"
+                                ),
                                 f"{cost_of_equity * 100:.2f}%",
-                                f"${total_debt / 1e9:.2f}B / ${net_debt / 1e9:.2f}B",
+                                (
+                                    f"${total_debt / 1e9:.2f}B /"
+                                    f" ${net_debt / 1e9:.2f}B"
+                                ),
                                 f"{shares_out / 1e9:.2f}B",
                             ],
                         })
-                        st.dataframe(assumptions, use_container_width=True, hide_index=True)
+                        st.dataframe(
+                            assumptions, use_container_width=True, hide_index=True
+                        )
                         st.code(
                             "Revenue_t = Revenue_(t-1) * (1 + revenue_growth)\n"
                             "Net Income_t = Revenue_t * target_net_margin\n"
                             "FCFE_t = Net Income_t * cash_flow_conversion_rate\n"
                             "PV(FCFE_t) = FCFE_t / (1 + discount_rate)^t\n"
                             "Terminal Value = FCFE_N * exit_multiple\n"
-                            "DCF Value / Share = (sum(PV of FCFE) + PV(Terminal Value)) / Shares",
+                            "DCF Value / Share = (sum(PV of FCFE) + PV(Terminal"
+                            " Value)) / Shares",
                             language="text",
                         )
                         dcf_demo = pd.DataFrame({
@@ -1920,23 +2716,41 @@ if symbol and app_view == "Stock Analysis":
                         demo5.metric("每股內在價值", f"${scenario_value:.2f}")
 
             else:
-                st.error("❌ 該公司歷史 Free Cash Flow 持續為負數、數據缺失或無流通股數，無法進行 DCF 現金流估值。")
+                st.error(
+                    "❌ 該公司歷史 Free Cash Flow"
+                    " 持續為負數、數據缺失或無流通股數，無法進行 DCF 現金流估值。"
+                )
 
             # ==========================================
             # 3.5 公司自由現金流 (FCF) 與歷年成長率視覺化圖表
             # ==========================================
             st.write("---")
-            st.subheader("💵 3.5 公司自由現金流 (Free Cash Flow, FCF) 與年增長率 (YoY Growth Rate) 趨勢")
+            st.subheader(
+                "💵 3.5 公司自由現金流 (Free Cash Flow, FCF) 與年增長率 (YoY Growth Rate)"
+                " 趨勢"
+            )
 
             tot_rev_ttm = info.get("totalRevenue", 0) or 0
-            fcf_margin = (base_fcf / tot_rev_ttm * 100) if tot_rev_ttm > 0 else 0.0
+            fcf_margin = (
+                (base_fcf / tot_rev_ttm * 100) if tot_rev_ttm > 0 else 0.0
+            )
             fcf_per_share = (base_fcf / shares_out) if shares_out > 0 else 0.0
 
             fc1, fc2, fc3, fc4 = st.columns(4)
-            fc1.metric("近 12 個月 FCF (TTM)", f"${base_fcf/1e9:.2f} B" if base_fcf > 1e9 else f"${base_fcf/1e6:.2f} M")
+            fc1.metric(
+                "近 12 個月 FCF (TTM)",
+                (
+                    f"${base_fcf/1e9:.2f} B"
+                    if base_fcf > 1e9
+                    else f"${base_fcf/1e6:.2f} M"
+                ),
+            )
             fc2.metric("每股自由現金流 (FCF/Share)", f"${fcf_per_share:.2f}")
             fc3.metric("自由現金流利潤率 (FCF Margin)", f"{fcf_margin:.2f}%")
-            fc4.metric("市價與 FCF 比率 (P/FCF)", f"{mkt_cap_val / base_fcf:.2f}x" if base_fcf > 0 else "N/A")
+            fc4.metric(
+                "市價與 FCF 比率 (P/FCF)",
+                f"{mkt_cap_val / base_fcf:.2f}x" if base_fcf > 0 else "N/A",
+            )
 
             if len(fcf_history) >= 2 and fcf_dates:
                 fcf_chronological = fcf_history[::-1]
@@ -1953,9 +2767,9 @@ if symbol and app_view == "Stock Analysis":
                         y=[f / 1e9 for f in fcf_chronological],
                         name="FCF 金額 ($B)",
                         marker_color="#00CC96",
-                        opacity=0.85
+                        opacity=0.85,
                     ),
-                    secondary_y=False
+                    secondary_y=False,
                 )
 
                 fig_fcf.add_trace(
@@ -1964,12 +2778,15 @@ if symbol and app_view == "Stock Analysis":
                         y=fcf_growth_rates,
                         name="FCF 年增率 (YoY %)",
                         mode="lines+markers+text",
-                        text=[f"{g:.1f}%" if pd.notna(g) else "" for g in fcf_growth_rates],
+                        text=[
+                            f"{g:.1f}%" if pd.notna(g) else ""
+                            for g in fcf_growth_rates
+                        ],
                         textposition="top center",
                         line=dict(color="#FFD700", width=3),
-                        marker=dict(size=8, color="#FFD700")
+                        marker=dict(size=8, color="#FFD700"),
                     ),
-                    secondary_y=True
+                    secondary_y=True,
                 )
 
                 fig_fcf.update_layout(
@@ -1977,11 +2794,15 @@ if symbol and app_view == "Stock Analysis":
                     xaxis_title="財報年度",
                     height=360,
                     hovermode="x unified",
-                    margin=dict(t=50, b=20)
+                    margin=dict(t=50, b=20),
                 )
 
-                fig_fcf.update_yaxes(title_text="<b>FCF 金額 (十億美元)</b>", secondary_y=False)
-                fig_fcf.update_yaxes(title_text="<b>FCF 年增率 (%)</b>", secondary_y=True)
+                fig_fcf.update_yaxes(
+                    title_text="<b>FCF 金額 (十億美元)</b>", secondary_y=False
+                )
+                fig_fcf.update_yaxes(
+                    title_text="<b>FCF 年增率 (%)</b>", secondary_y=True
+                )
 
                 st.plotly_chart(fig_fcf, use_container_width=True)
 
@@ -1989,7 +2810,9 @@ if symbol and app_view == "Stock Analysis":
             # 4. 5年長期財務成長率與永續性
             # ==========================================
             st.write("---")
-            st.subheader("📊 4. 財務成長率與公司永續性分析 (Growth Rate & Long-term History)")
+            st.subheader(
+                "📊 4. 財務成長率與公司永續性分析 (Growth Rate & Long-term History)"
+            )
 
             growth_view = st.radio(
                 "選擇財務數據維度：",
@@ -2000,10 +2823,16 @@ if symbol and app_view == "Stock Analysis":
 
             df_fin_show = q_fin.T if "單季" in growth_view else fin.T
 
-            if not df_fin_show.empty and "Total Revenue" in df_fin_show.columns:
+            if (
+                not df_fin_show.empty
+                and "Total Revenue" in df_fin_show.columns
+            ):
                 df_fin_show = df_fin_show.sort_index()
                 revenue = df_fin_show["Total Revenue"] / 1e9
-                net_inc = df_fin_show.get("Net Income", df_fin_show.get("Net Income Common Stockholders"))
+                net_inc = df_fin_show.get(
+                    "Net Income",
+                    df_fin_show.get("Net Income Common Stockholders"),
+                )
                 if net_inc is not None:
                     net_inc = net_inc / 1e9
 
@@ -2011,17 +2840,48 @@ if symbol and app_view == "Stock Analysis":
                 inc_g = net_inc.pct_change() * 100 if net_inc is not None else None
 
                 fig_g = make_subplots(
-                    rows=1, cols=2,
-                    subplot_titles=("總營收與淨利金額 (10億美元)", "增長率趨勢 (%)")
+                    rows=1,
+                    cols=2,
+                    subplot_titles=("總營收與淨利金額 (10億美元)", "增長率趨勢 (%)"),
                 )
 
-                fig_g.add_trace(go.Bar(x=revenue.index.astype(str), y=revenue, name="Revenue"), row=1, col=1)
+                fig_g.add_trace(
+                    go.Bar(x=revenue.index.astype(str), y=revenue, name="Revenue"),
+                    row=1,
+                    col=1,
+                )
                 if net_inc is not None:
-                    fig_g.add_trace(go.Bar(x=net_inc.index.astype(str), y=net_inc, name="Net Income"), row=1, col=1)
-                
-                fig_g.add_trace(go.Scatter(x=rev_g.index.astype(str), y=rev_g, name="Revenue Growth %", mode="lines+markers"), row=1, col=2)
+                    fig_g.add_trace(
+                        go.Bar(
+                            x=net_inc.index.astype(str),
+                            y=net_inc,
+                            name="Net Income",
+                        ),
+                        row=1,
+                        col=1,
+                    )
+
+                fig_g.add_trace(
+                    go.Scatter(
+                        x=rev_g.index.astype(str),
+                        y=rev_g,
+                        name="Revenue Growth %",
+                        mode="lines+markers",
+                    ),
+                    row=1,
+                    col=2,
+                )
                 if inc_g is not None:
-                    fig_g.add_trace(go.Scatter(x=inc_g.index.astype(str), y=inc_g, name="Income Growth %", mode="lines+markers"), row=1, col=2)
+                    fig_g.add_trace(
+                        go.Scatter(
+                            x=inc_g.index.astype(str),
+                            y=inc_g,
+                            name="Income Growth %",
+                            mode="lines+markers",
+                        ),
+                        row=1,
+                        col=2,
+                    )
 
                 fig_g.update_layout(height=350, hovermode="x unified")
                 st.plotly_chart(fig_g, use_container_width=True)
@@ -2038,9 +2898,13 @@ if symbol and app_view == "Stock Analysis":
                 st.warning("⚠️ 歷史交易 K 線資料不足，無法繪製技術面指標。")
             else:
                 required_cols = ["Open", "High", "Low", "Close", "Volume"]
-                missing_cols = [c for c in required_cols if c not in df_hist.columns]
+                missing_cols = [
+                    c for c in required_cols if c not in df_hist.columns
+                ]
                 if missing_cols:
-                    st.warning(f"⚠️ 技術面資料缺少必要欄位：{missing_cols}，無法繪製技術圖表。")
+                    st.warning(
+                        f"⚠️ 技術面資料缺少必要欄位：{missing_cols}，無法繪製技術圖表。"
+                    )
                 else:
                     df_hist = df_hist.dropna(subset=required_cols).copy()
                     if len(df_hist) < 20:
@@ -2049,19 +2913,24 @@ if symbol and app_view == "Stock Analysis":
                         df_hist["MA10"] = df_hist["Close"].rolling(10).mean()
                         df_hist["MA20"] = df_hist["Close"].rolling(20).mean()
                         df_hist["MA55"] = df_hist["Close"].rolling(55).mean()
-                        df_hist["EMA20"] = df_hist["Close"].ewm(span=20, adjust=False).mean()
-                        df_hist["EMA50"] = df_hist["Close"].ewm(span=50, adjust=False).mean()
+                        df_hist["EMA20"] = (
+                            df_hist["Close"].ewm(span=20, adjust=False).mean()
+                        )
+                        df_hist["EMA50"] = (
+                            df_hist["Close"].ewm(span=50, adjust=False).mean()
+                        )
                         df_hist["RSI14"] = calculate_rsi(df_hist["Close"], 14)
                         df_hist["BB_Middle"] = df_hist["Close"].rolling(20).mean()
                         bb_std = df_hist["Close"].rolling(20).std()
                         df_hist["BB_Upper"] = df_hist["BB_Middle"] + (2 * bb_std)
                         df_hist["BB_Lower"] = df_hist["BB_Middle"] - (2 * bb_std)
                         df_hist["BB_Bandwidth"] = (
-                            (df_hist["BB_Upper"] - df_hist["BB_Lower"]) / df_hist["BB_Middle"].replace(0, np.nan)
-                        )
+                            df_hist["BB_Upper"] - df_hist["BB_Lower"]
+                        ) / df_hist["BB_Middle"].replace(0, np.nan)
                         df_hist["BB_%B"] = (
-                            (df_hist["Close"] - df_hist["BB_Lower"]) /
-                            (df_hist["BB_Upper"] - df_hist["BB_Lower"]).replace(0, np.nan)
+                            df_hist["Close"] - df_hist["BB_Lower"]
+                        ) / (df_hist["BB_Upper"] - df_hist["BB_Lower"]).replace(
+                            0, np.nan
                         )
 
                         if len(df_hist) >= 250:
@@ -2072,10 +2941,16 @@ if symbol and app_view == "Stock Analysis":
                             ma250_valid = False
                             ma250_val = 0.0
 
-                        ema12 = df_hist["Close"].ewm(span=12, adjust=False).mean()
-                        ema26 = df_hist["Close"].ewm(span=26, adjust=False).mean()
+                        ema12 = (
+                            df_hist["Close"].ewm(span=12, adjust=False).mean()
+                        )
+                        ema26 = (
+                            df_hist["Close"].ewm(span=26, adjust=False).mean()
+                        )
                         df_hist["MACD"] = ema12 - ema26
-                        df_hist["Signal"] = df_hist["MACD"].ewm(span=9, adjust=False).mean()
+                        df_hist["Signal"] = (
+                            df_hist["MACD"].ewm(span=9, adjust=False).mean()
+                        )
                         df_hist["Hist"] = df_hist["MACD"] - df_hist["Signal"]
 
                         trend_status, trend_desc = classify_trend_status(df_hist)
@@ -2083,7 +2958,9 @@ if symbol and app_view == "Stock Analysis":
                         all_divergences = scan_all_macd_divergences(df_hist)
                         if all_divergences:
                             div_type = all_divergences[-1]["type"]
-                        rsi_divergences = scan_indicator_divergences(df_hist, "RSI14")
+                        rsi_divergences = scan_indicator_divergences(
+                            df_hist, "RSI14"
+                        )
                         if rsi_divergences:
                             rsi_div_type = rsi_divergences[-1]["type"]
                         rsi_value = float(df_hist["RSI14"].iloc[-1])
@@ -2091,13 +2968,23 @@ if symbol and app_view == "Stock Analysis":
 
                         vol_ma20 = df_hist["Volume"].rolling(20).mean()
                         curr_vol = df_hist["Volume"].iloc[-1]
-                        curr_ret = (df_hist["Close"].iloc[-1] - df_hist["Open"].iloc[-1]) / df_hist["Open"].iloc[-1]
-                        high_20 = df_hist["High"].rolling(20).max().shift(1).iloc[-1]
+                        curr_ret = (
+                            df_hist["Close"].iloc[-1] - df_hist["Open"].iloc[-1]
+                        ) / df_hist["Open"].iloc[-1]
+                        high_20 = (
+                            df_hist["High"].rolling(20).max().shift(1).iloc[-1]
+                        )
 
-                        if curr_vol > vol_ma20.iloc[-1] * 1.5 and curr_ret > 0.02 and df_hist["Close"].iloc[-1] > high_20:
+                        if (
+                            curr_vol > vol_ma20.iloc[-1] * 1.5
+                            and curr_ret > 0.02
+                            and df_hist["Close"].iloc[-1] > high_20
+                        ):
                             gunshot_signal = True
 
-                        support_level, resistance_level = find_smart_support_resistance(df_hist)
+                        support_level, resistance_level = (
+                            find_smart_support_resistance(df_hist)
+                        )
                         poc_price = find_volume_poc(df_hist)
 
                         h_max = df_hist["High"].max()
@@ -2110,34 +2997,59 @@ if symbol and app_view == "Stock Analysis":
                         m20_val = df_hist["MA20"].iloc[-1]
                         m55_val = df_hist["MA55"].iloc[-1]
 
-                        st.info(f"📊 **當前趨勢評級：{trend_status}**\n\n{trend_desc}")
-                        rsi_status = "超買" if rsi_value > 70 else "超賣" if rsi_value < 30 else "中性"
+                        st.info(
+                            f"📊 **當前趨勢評級：{trend_status}**\n\n{trend_desc}"
+                        )
+                        rsi_status = (
+                            "超買"
+                            if rsi_value > 70
+                            else "超賣" if rsi_value < 30 else "中性"
+                        )
                         st.caption(
-                            f"RSI(14): **{rsi_value:.1f} ({rsi_status})** | "
-                            f"Bollinger %B: **{bollinger_state['percent_b']:.2f}** | "
-                            f"BandWidth: **{bollinger_state['bandwidth']:.2%}** | "
-                            f"{'⚡ Squeeze' if bollinger_state['squeeze'] else '波動正常'} | "
-                            f"{bollinger_state['tag']}"
+                            f"RSI(14): **{rsi_value:.1f} ({rsi_status})** |"
+                            " Bollinger %B:"
+                            f" **{bollinger_state['percent_b']:.2f}** |"
+                            f" BandWidth: **{bollinger_state['bandwidth']:.2%}**"
+                            f" |"
+                            f" {'⚡ Squeeze' if bollinger_state['squeeze'] else '波動正常'}"
+                            f" | {bollinger_state['tag']}"
                         )
 
                         if gunshot_signal:
-                            st.success("🔥 **觸發 Livermore 第一槍爆發型態**：今日帶量突破近 20 日高點！")
+                            st.success(
+                                "🔥 **觸發 Livermore 第一槍爆發型態**：今日帶量突破近"
+                                " 20 日高點！"
+                            )
                         else:
                             st.caption("ℹ️ 今日未觸發第一槍帶量突破訊號。")
 
-                        with st.expander("🔍 點擊查看近 2 年歷史 MACD 背離觸發時間點明細"):
+                        with st.expander(
+                            "🔍 點擊查看近 2 年歷史 MACD 背離觸發時間點明細"
+                        ):
                             if all_divergences:
-                                div_df = pd.DataFrame(all_divergences)[['date', 'type', 'price', 'macd']]
-                                div_df['date'] = pd.to_datetime(div_df['date']).dt.strftime('%Y-%m-%d')
+                                div_df = pd.DataFrame(all_divergences)[
+                                    ["date", "type", "price", "macd"]
+                                ]
+                                div_df["date"] = pd.to_datetime(
+                                    div_df["date"]
+                                ).dt.strftime("%Y-%m-%d")
                                 st.dataframe(div_df, use_container_width=True)
                             else:
                                 st.info("近 2 年區間內未偵測到顯著 MACD 背離點位。")
 
                         with st.expander("📐 RSI(14) 背離與 Bollinger Band 訊號"):
                             if rsi_divergences:
-                                rsi_df = pd.DataFrame(rsi_divergences)[["date", "type", "price", "indicator"]].rename(columns={"indicator": "RSI"})
-                                rsi_df["date"] = pd.to_datetime(rsi_df["date"]).dt.strftime("%Y-%m-%d")
-                                st.dataframe(rsi_df, use_container_width=True, hide_index=True)
+                                rsi_df = pd.DataFrame(rsi_divergences)[
+                                    ["date", "type", "price", "indicator"]
+                                ].rename(columns={"indicator": "RSI"})
+                                rsi_df["date"] = pd.to_datetime(
+                                    rsi_df["date"]
+                                ).dt.strftime("%Y-%m-%d")
+                                st.dataframe(
+                                    rsi_df,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
                             else:
                                 st.info("近 2 年區間內未偵測到顯著 RSI 背離。")
 
@@ -2145,10 +3057,15 @@ if symbol and app_view == "Stock Analysis":
                         # 6. 關鍵支撐/壓力位與黃金分割
                         # ==========================================
                         st.write("---")
-                        st.subheader("🛡️ 6. 關鍵支撐/壓力位、籌碼密集區 (POC) 與斐波那契黃金分割")
+                        st.subheader(
+                            "🛡️ 6. 關鍵支撐/壓力位、籌碼密集區 (POC)"
+                            " 與斐波那契黃金分割"
+                        )
 
                         k1, k2, k3, k4, k5 = st.columns(5)
-                        k1.metric("波段壓力位 (Resistance)", f"${resistance_level:.2f}")
+                        k1.metric(
+                            "波段壓力位 (Resistance)", f"${resistance_level:.2f}"
+                        )
                         k2.metric("波段支撐位 (Support)", f"${support_level:.2f}")
                         k3.metric("籌碼密集區 (POC)", f"${poc_price:.2f}")
                         k4.metric("斐波那契 (61.8%)", f"${fib_618:.2f}")
@@ -2158,14 +3075,31 @@ if symbol and app_view == "Stock Analysis":
             # 7. 機構級全方位分析報告
             # ==========================================
             st.write("---")
-            st.subheader("📝 7. 全方位技術面與機構交易決策報告 (Institutional Analysis Report)")
+            st.subheader(
+                "📝 7. 全方位技術面與機構交易決策報告 (Institutional Analysis"
+                " Report)"
+            )
 
             narrative_output = generate_technical_narrative(
-                symbol, curr_price, m10_val, m20_val, m55_val, ma250_val,
-                gunshot_signal, div_type, support_level, resistance_level,
-                fib_618, poc_price, trend_status, trend_desc, ma250_valid=ma250_valid,
-                rsi_value=rsi_value, rsi_div_type=rsi_div_type,
-                bollinger_state=bollinger_state, macd_divergence=bool(all_divergences)
+                symbol,
+                curr_price,
+                m10_val,
+                m20_val,
+                m55_val,
+                ma250_val,
+                gunshot_signal,
+                div_type,
+                support_level,
+                resistance_level,
+                fib_618,
+                poc_price,
+                trend_status,
+                trend_desc,
+                ma250_valid=ma250_valid,
+                rsi_value=rsi_value,
+                rsi_div_type=rsi_div_type,
+                bollinger_state=bollinger_state,
+                macd_divergence=bool(all_divergences),
             )
             st.markdown(narrative_output)
 
@@ -2173,10 +3107,16 @@ if symbol and app_view == "Stock Analysis":
             # 8. 綜合投資評級 Engine
             # ==========================================
             st.write("---")
-            st.subheader("🏆 8. 綜合投資評級與實戰決策 (Factor-Based Rating Engine)")
+            st.subheader(
+                "🏆 8. 綜合投資評級與實戰決策 (Factor-Based Rating Engine)"
+            )
 
             fund_score = 35 if (base_val and base_val > curr_price) else 20
-            tech_score = 25 if "Bull" in trend_status or gunshot_signal or "Bullish" in div_type else 15
+            tech_score = (
+                25
+                if "Bull" in trend_status or gunshot_signal or "Bullish" in div_type
+                else 15
+            )
             total_score = fund_score + tech_score
 
             if total_score >= 50:
@@ -2201,52 +3141,251 @@ if symbol and app_view == "Stock Analysis":
             # 9. Interactive Plotly Chart
             # ==========================================
             st.write("---")
-            st.subheader("📈 9. Python 動態圖表 (含 Fibonacci / Standard MA / MACD / RSI / Bollinger 背離標記)")
+            st.subheader(
+                "📈 9. Python 動態圖表 (含 Fibonacci / Standard MA / MACD / RSI /"
+                " Bollinger 背離標記)"
+            )
 
             if not df_hist.empty and len(df_hist) >= 20:
-                fig_k = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.025, row_heights=[0.58, 0.22, 0.20], subplot_titles=("Price / EMA20 / EMA50", "RSI (14)", "MACD (12,26,9)"))
-                fig_k.add_trace(go.Candlestick(x=df_hist.index, open=df_hist['Open'], high=df_hist['High'], low=df_hist['Low'], close=df_hist['Close'], name="K Line"), row=1, col=1)
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["BB_Upper"], name="BB Upper", line=dict(color="#B388FF", width=1)), row=1, col=1)
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["BB_Lower"], name="BB Lower", line=dict(color="#B388FF", width=1), fill="tonexty", fillcolor="rgba(179, 136, 255, 0.12)"), row=1, col=1)
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["BB_Middle"], name="BB Middle", line=dict(color="#CE93D8", width=1, dash="dot")), row=1, col=1)
-                
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MA10'], name="MA10 (Yellow)", line=dict(color="#FFEB3B", width=1.2)), row=1, col=1)
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MA20'], name="MA20 (Blue)", line=dict(color="#2196F3", width=1.5)), row=1, col=1)
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MA55'], name="MA55 (Green)", line=dict(color="#4CAF50", width=1.8)), row=1, col=1)
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["EMA20"], name="EMA20", line=dict(color="#00D4FF", width=1.8)), row=1, col=1)
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["EMA50"], name="EMA50", line=dict(color="#FF9F1C", width=1.8)), row=1, col=1)
-                
+                fig_k = make_subplots(
+                    rows=3,
+                    cols=1,
+                    shared_xaxes=True,
+                    vertical_spacing=0.025,
+                    row_heights=[0.58, 0.22, 0.20],
+                    subplot_titles=(
+                        "Price / EMA20 / EMA50",
+                        "RSI (14)",
+                        "MACD (12,26,9)",
+                    ),
+                )
+                fig_k.add_trace(
+                    go.Candlestick(
+                        x=df_hist.index,
+                        open=df_hist["Open"],
+                        high=df_hist["High"],
+                        low=df_hist["Low"],
+                        close=df_hist["Close"],
+                        name="K Line",
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["BB_Upper"],
+                        name="BB Upper",
+                        line=dict(color="#B388FF", width=1),
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["BB_Lower"],
+                        name="BB Lower",
+                        line=dict(color="#B388FF", width=1),
+                        fill="tonexty",
+                        fillcolor="rgba(179, 136, 255, 0.12)",
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["BB_Middle"],
+                        name="BB Middle",
+                        line=dict(color="#CE93D8", width=1, dash="dot"),
+                    ),
+                    row=1,
+                    col=1,
+                )
+
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["MA10"],
+                        name="MA10 (Yellow)",
+                        line=dict(color="#FFEB3B", width=1.2),
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["MA20"],
+                        name="MA20 (Blue)",
+                        line=dict(color="#2196F3", width=1.5),
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["MA55"],
+                        name="MA55 (Green)",
+                        line=dict(color="#4CAF50", width=1.8),
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["EMA20"],
+                        name="EMA20",
+                        line=dict(color="#00D4FF", width=1.8),
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["EMA50"],
+                        name="EMA50",
+                        line=dict(color="#FF9F1C", width=1.8),
+                    ),
+                    row=1,
+                    col=1,
+                )
+
                 if ma250_valid:
-                    fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MA250'], name="MA250 (Red)", line=dict(color="#F44336", width=2.2)), row=1, col=1)
-
-                fig_k.add_hline(y=support_level, line_dash="dash", line_color="green", annotation_text="Support", row=1, col=1)
-                fig_k.add_hline(y=resistance_level, line_dash="dash", line_color="red", annotation_text="Resistance", row=1, col=1)
-                fig_k.add_hline(y=poc_price, line_color="gold", annotation_text="POC Area", row=1, col=1)
-
-                for div in all_divergences:
-                    color_tag = "green" if "看多" in div['type'] else "red"
-                    fig_k.add_annotation(
-                        x=div['date'], y=div['price'],
-                        text=" Bull" if "看多" in div['type'] else " Bear",
-                        showarrow=True, arrowhead=2, arrowcolor=color_tag, ax=0, ay=-25 if "看多" in div['type'] else 25,
-                        row=1, col=1
+                    fig_k.add_trace(
+                        go.Scatter(
+                            x=df_hist.index,
+                            y=df_hist["MA250"],
+                            name="MA250 (Red)",
+                            line=dict(color="#F44336", width=2.2),
+                        ),
+                        row=1,
+                        col=1,
                     )
 
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist["RSI14"], name="RSI (14)", line=dict(color="#00BFA5", width=2)), row=2, col=1)
-                fig_k.add_hline(y=70, line_dash="dash", line_color="#EF5350", annotation_text="Overbought 70", row=2, col=1)
-                fig_k.add_hline(y=30, line_dash="dash", line_color="#42A5F5", annotation_text="Oversold 30", row=2, col=1)
+                fig_k.add_hline(
+                    y=support_level,
+                    line_dash="dash",
+                    line_color="green",
+                    annotation_text="Support",
+                    row=1,
+                    col=1,
+                )
+                fig_k.add_hline(
+                    y=resistance_level,
+                    line_dash="dash",
+                    line_color="red",
+                    annotation_text="Resistance",
+                    row=1,
+                    col=1,
+                )
+                fig_k.add_hline(
+                    y=poc_price,
+                    line_color="gold",
+                    annotation_text="POC Area",
+                    row=1,
+                    col=1,
+                )
+
+                for div in all_divergences:
+                    color_tag = "green" if "看多" in div["type"] else "red"
+                    fig_k.add_annotation(
+                        x=div["date"],
+                        y=div["price"],
+                        text=" Bull" if "看多" in div["type"] else " Bear",
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowcolor=color_tag,
+                        ax=0,
+                        ay=-25 if "看多" in div["type"] else 25,
+                        row=1,
+                        col=1,
+                    )
+
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["RSI14"],
+                        name="RSI (14)",
+                        line=dict(color="#00BFA5", width=2),
+                    ),
+                    row=2,
+                    col=1,
+                )
+                fig_k.add_hline(
+                    y=70,
+                    line_dash="dash",
+                    line_color="#EF5350",
+                    annotation_text="Overbought 70",
+                    row=2,
+                    col=1,
+                )
+                fig_k.add_hline(
+                    y=30,
+                    line_dash="dash",
+                    line_color="#42A5F5",
+                    annotation_text="Oversold 30",
+                    row=2,
+                    col=1,
+                )
                 for div in rsi_divergences:
                     color_tag = "green" if "看多" in div["type"] else "red"
-                    fig_k.add_annotation(x=div["date"], y=div["indicator"], text=" RSI Bull" if "看多" in div["type"] else " RSI Bear", showarrow=True, arrowhead=2, arrowcolor=color_tag, ax=0, ay=-18 if "看多" in div["type"] else 18, row=2, col=1)
+                    fig_k.add_annotation(
+                        x=div["date"],
+                        y=div["indicator"],
+                        text=" RSI Bull" if "看多" in div["type"] else " RSI Bear",
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowcolor=color_tag,
+                        ax=0,
+                        ay=-18 if "看多" in div["type"] else 18,
+                        row=2,
+                        col=1,
+                    )
 
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['MACD'], name="MACD", line=dict(color="blue")), row=3, col=1)
-                fig_k.add_trace(go.Scatter(x=df_hist.index, y=df_hist['Signal'], name="Signal", line=dict(color="orange")), row=3, col=1)
-                fig_k.add_trace(go.Bar(x=df_hist.index, y=df_hist['Hist'], name="Hist", marker_color="gray"), row=3, col=1)
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["MACD"],
+                        name="MACD",
+                        line=dict(color="blue"),
+                    ),
+                    row=3,
+                    col=1,
+                )
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["Signal"],
+                        name="Signal",
+                        line=dict(color="orange"),
+                    ),
+                    row=3,
+                    col=1,
+                )
+                fig_k.add_trace(
+                    go.Bar(
+                        x=df_hist.index,
+                        y=df_hist["Hist"],
+                        name="Hist",
+                        marker_color="gray",
+                    ),
+                    row=3,
+                    col=1,
+                )
 
                 scanner_signal = st.session_state.get("selected_scanner_signal")
                 if scanner_signal and scanner_signal.get("Ticker") == symbol:
                     trigger_date = pd.Timestamp(scanner_signal["Trigger Date"])
-                    signal_color = "green" if scanner_signal["Signal Type"] == "Bullish" else "red"
+                    signal_color = (
+                        "green"
+                        if scanner_signal["Signal Type"] == "Bullish"
+                        else "red"
+                    )
                     fig_k.add_vline(
                         x=trigger_date,
                         line_dash="dash",
@@ -2255,48 +3394,79 @@ if symbol and app_view == "Stock Analysis":
                         row=1,
                         col=1,
                     )
-                    pivot_dates = [pd.Timestamp(scanner_signal["First Date"]), trigger_date]
-                    fig_k.add_trace(go.Scatter(
-                        x=pivot_dates,
-                        y=[scanner_signal["First Price"], scanner_signal["Second Price"]],
-                        mode="lines+markers",
-                        name="Dual divergence price pivots",
-                        line=dict(color=signal_color, width=3),
-                        marker=dict(size=8),
-                    ), row=1, col=1)
-                    fig_k.add_trace(go.Scatter(
-                        x=pivot_dates,
-                        y=[scanner_signal["First RSI"], scanner_signal["Second RSI"]],
-                        mode="lines+markers",
-                        name="Dual divergence RSI pivots",
-                        line=dict(color=signal_color, width=2),
-                        marker=dict(size=7),
-                    ), row=2, col=1)
-                    fig_k.add_trace(go.Scatter(
-                        x=pivot_dates,
-                        y=[scanner_signal["First MACD"], scanner_signal["Second MACD"]],
-                        mode="lines+markers",
-                        name="Dual divergence MACD pivots",
-                        line=dict(color=signal_color, width=2),
-                        marker=dict(size=7),
-                    ), row=3, col=1)
+                    pivot_dates = [
+                        pd.Timestamp(scanner_signal["First Date"]),
+                        trigger_date,
+                    ]
+                    fig_k.add_trace(
+                        go.Scatter(
+                            x=pivot_dates,
+                            y=[
+                                scanner_signal["First Price"],
+                                scanner_signal["Second Price"],
+                            ],
+                            mode="lines+markers",
+                            name="Dual divergence price pivots",
+                            line=dict(color=signal_color, width=3),
+                            marker=dict(size=8),
+                        ),
+                        row=1,
+                        col=1,
+                    )
+                    fig_k.add_trace(
+                        go.Scatter(
+                            x=pivot_dates,
+                            y=[
+                                scanner_signal["First RSI"],
+                                scanner_signal["Second RSI"],
+                            ],
+                            mode="lines+markers",
+                            name="Dual divergence RSI pivots",
+                            line=dict(color=signal_color, width=2),
+                            marker=dict(size=7),
+                        ),
+                        row=2,
+                        col=1,
+                    )
+                    fig_k.add_trace(
+                        go.Scatter(
+                            x=pivot_dates,
+                            y=[
+                                scanner_signal["First MACD"],
+                                scanner_signal["Second MACD"],
+                            ],
+                            mode="lines+markers",
+                            name="Dual divergence MACD pivots",
+                            line=dict(color=signal_color, width=2),
+                            marker=dict(size=7),
+                        ),
+                        row=3,
+                        col=1,
+                    )
 
                 fig_k.update_yaxes(range=[0, 100], row=2, col=1)
-                fig_k.update_layout(height=760, xaxis_rangeslider_visible=False, margin=dict(t=35, b=20))
+                fig_k.update_layout(
+                    height=760,
+                    xaxis_rangeslider_visible=False,
+                    margin=dict(t=35, b=20),
+                )
                 st.plotly_chart(fig_k, use_container_width=True)
 
             # ==========================================
-            # 10. Embedded TradingView Chart (Fixed Multi-MA via Standard Built-in Indicator Mapping)
+            # 10. Embedded TradingView Chart
             # ==========================================
             st.write("---")
-            st.subheader("📺 10. TradingView 官方進階技術圖表 (SMA 10/20/55/250 & 白色 Volume MA55)")
+            st.subheader(
+                "📺 10. TradingView 官方進階技術圖表 (SMA 10/20/55/250 & 白色"
+                " Volume MA55)"
+            )
             st.markdown(
                 '<div style="display:flex;gap:18px;flex-wrap:wrap;font-weight:600;">'
                 '<span style="color:#FFD166;">● MA10</span>'
                 '<span style="color:#00D4FF;">● MA20</span>'
                 '<span style="color:#7CFF6B;">● MA55</span>'
                 '<span style="color:#FF5C8A;">● MA250</span>'
-                '</div>',
+                "</div>",
                 unsafe_allow_html=True,
             )
             tv_symbol = map_symbol_for_tradingview(symbol)
@@ -2320,33 +3490,33 @@ if symbol and app_view == "Stock Analysis":
                 "studies": [
                   {{
                     "id": "MASimple@tv-basicstudies",
-                                        "inputs": {{ "length": 10 }},
-                                        "overrides": {{ "Plot.color": "#FFD166", "Plot.linewidth": 3 }}
+                    "inputs": {{ "length": 10 }},
+                    "overrides": {{ "Plot.color": "#FFD166", "Plot.linewidth": 3 }}
                   }},
-                                    {{
-                                        "id": "MASimple@tv-basicstudies",
-                                        "inputs": {{ "length": 20 }},
-                                        "overrides": {{ "Plot.color": "#00D4FF", "Plot.linewidth": 3 }}
-                                    }},
-                                    {{
-                                        "id": "MASimple@tv-basicstudies",
-                                        "inputs": {{ "length": 55 }},
-                                        "overrides": {{ "Plot.color": "#7CFF6B", "Plot.linewidth": 3 }}
-                                    }},
-                                    {{
-                                        "id": "MASimple@tv-basicstudies",
-                                        "inputs": {{ "length": 250 }},
-                                        "overrides": {{ "Plot.color": "#FF5C8A", "Plot.linewidth": 3 }}
-                                    }},
+                  {{
+                    "id": "MASimple@tv-basicstudies",
+                    "inputs": {{ "length": 20 }},
+                    "overrides": {{ "Plot.color": "#00D4FF", "Plot.linewidth": 3 }}
+                  }},
+                  {{
+                    "id": "MASimple@tv-basicstudies",
+                    "inputs": {{ "length": 55 }},
+                    "overrides": {{ "Plot.color": "#7CFF6B", "Plot.linewidth": 3 }}
+                  }},
+                  {{
+                    "id": "MASimple@tv-basicstudies",
+                    "inputs": {{ "length": 250 }},
+                    "overrides": {{ "Plot.color": "#FF5C8A", "Plot.linewidth": 3 }}
+                  }},
                   {{
                     "id": "Volume@tv-basicstudies",
                     "inputs": {{ "showMA": true, "maLength": 55 }}
                   }}
-                                ],
-                                "studies_overrides": {{
-                                    "volume.volume ma.color": "#FFFFFF",
-                                    "volume.volume ma.linewidth": 2
-                                }}
+                ],
+                "studies_overrides": {{
+                    "volume.volume ma.color": "#FFFFFF",
+                    "volume.volume ma.linewidth": 2
+                }}
               }});
               </script>
             </div>
@@ -2354,51 +3524,101 @@ if symbol and app_view == "Stock Analysis":
             components.html(tv_html, height=560)
 
             # ==========================================
-            # 11. 選擇權深度分析與大單異常籌碼掃描 (Options Analysis & Unusual Options Flow)
+            # 11. 選擇權深度分析與大單異常籌碼掃描
             # ==========================================
             st.write("---")
-            st.subheader("11. 選擇權深度分析與大單異常籌碼掃描 (Options Analysis & Unusual Options Flow)")
+            st.subheader(
+                "11. 選擇權深度分析與大單異常籌碼掃描 (Options Analysis & Unusual"
+                " Options Flow)"
+            )
             options_summary = fetch_options_analysis(symbol, curr_price)
             if not options_summary.get("available"):
                 st.info(
-                    f"ℹ️ {options_summary.get('message', '此標的沒有可用的選擇權市場資料。')} "
-                    "非美股（例如 .TW、.HK）通常不提供 yfinance 可讀取的選擇權鏈；其餘股票分析不受影響。"
+                    f"ℹ️ {options_summary.get('message', '此標的沒有可用的選擇權市場資料。')}"
+                    " 非美股（例如 .TW、.HK）通常不提供 yfinance"
+                    " 可讀取的選擇權鏈；其餘股票分析不受影響。"
                 )
             else:
                 pcr_volume = options_summary.get("pcr_volume", np.nan)
                 pcr_oi = options_summary.get("pcr_oi", np.nan)
                 iv_summary = options_summary.get("iv_summary", {})
                 overview_1, overview_2, overview_3, overview_4 = st.columns(4)
-                overview_1.metric("Put/Call Ratio (Volume)", f"{pcr_volume:.2f}" if pd.notna(pcr_volume) else "N/A")
-                overview_2.metric("Put/Call Ratio (OI)", f"{pcr_oi:.2f}" if pd.notna(pcr_oi) else "N/A")
-                overview_3.metric("Max Pain Price", f"${options_summary['max_pain']:.2f}" if pd.notna(options_summary.get("max_pain")) else "N/A")
-                overview_4.metric("NTM Put IV - Call IV", f"{iv_summary.get('Put-Call IV Skew', np.nan) * 100:.2f}%" if pd.notna(iv_summary.get("Put-Call IV Skew")) else "N/A")
-
-                st.caption(
-                    f"掃描到期日：{', '.join(options_summary['expirations'])} | "
-                    f"NTM Call IV: {iv_summary.get('Call IV', np.nan) * 100:.2f}% | "
-                    f"NTM Put IV: {iv_summary.get('Put IV', np.nan) * 100:.2f}%"
-                    if pd.notna(iv_summary.get("Call IV")) and pd.notna(iv_summary.get("Put IV"))
-                    else f"掃描到期日：{', '.join(options_summary['expirations'])} | NTM IV 資料不足"
+                overview_1.metric(
+                    "Put/Call Ratio (Volume)",
+                    (
+                        f"{pcr_volume:.2f}"
+                        if pd.notna(pcr_volume)
+                        else "N/A"
+                    ),
+                )
+                overview_2.metric(
+                    "Put/Call Ratio (OI)",
+                    f"{pcr_oi:.2f}" if pd.notna(pcr_oi) else "N/A",
+                )
+                overview_3.metric(
+                    "Max Pain Price",
+                    (
+                        f"${options_summary['max_pain']:.2f}"
+                        if pd.notna(options_summary.get("max_pain"))
+                        else "N/A"
+                    ),
+                )
+                overview_4.metric(
+                    "NTM Put IV - Call IV",
+                    (
+                        f"{iv_summary.get('Put-Call IV Skew', np.nan) * 100:.2f}%"
+                        if pd.notna(iv_summary.get("Put-Call IV Skew"))
+                        else "N/A"
+                    ),
                 )
 
-                st.markdown("##### 🔎 Smart Money Unusual Flow（Volume > 2.5 × OI 且 Volume > 1,000）")
-                unusual_flow = options_summary.get("unusual", pd.DataFrame()).copy()
+                st.caption(
+                    f"掃描到期日：{', '.join(options_summary['expirations'])} |"
+                    f" NTM Call IV:"
+                    f" {iv_summary.get('Call IV', np.nan) * 100:.2f}% | NTM Put"
+                    f" IV: {iv_summary.get('Put IV', np.nan) * 100:.2f}%"
+                    if pd.notna(iv_summary.get("Call IV"))
+                    and pd.notna(iv_summary.get("Put IV"))
+                    else (
+                        f"掃描到期日：{', '.join(options_summary['expirations'])} |"
+                        " NTM IV 資料不足"
+                    )
+                )
+
+                st.markdown(
+                    "##### 🔎 Smart Money Unusual Flow（Volume > 2.5 × OI 且 Volume"
+                    " > 1,000）"
+                )
+                unusual_flow = options_summary.get(
+                    "unusual", pd.DataFrame()
+                ).copy()
                 if unusual_flow.empty:
-                    st.info("近 45 天到期選擇權中沒有符合異常大單條件的合約。")
+                    st.info(
+                        "近 45 天到期選擇權中沒有符合異常大單條件的合約。"
+                    )
                 else:
-                    unusual_flow["Implied Volatility"] = unusual_flow["Implied Volatility"] * 100
-                    unusual_flow["Vol/OI Ratio"] = unusual_flow["Vol/OI Ratio"].replace(np.inf, np.nan)
+                    unusual_flow["Implied Volatility"] = (
+                        unusual_flow["Implied Volatility"] * 100
+                    )
+                    unusual_flow["Vol/OI Ratio"] = unusual_flow[
+                        "Vol/OI Ratio"
+                    ].replace(np.inf, np.nan)
                     st.dataframe(
                         unusual_flow.style.format({
-                            "Strike Price": "${:.2f}", "Volume": "{:.0f}", "Open Interest": "{:.0f}",
-                            "Vol/OI Ratio": "{:.2f}x", "Implied Volatility": "{:.2f}%",
+                            "Strike Price": "${:.2f}",
+                            "Volume": "{:.0f}",
+                            "Open Interest": "{:.0f}",
+                            "Vol/OI Ratio": "{:.2f}x",
+                            "Implied Volatility": "{:.2f}%",
                             "Estimated Trade Value": "${:,.0f}",
                         }),
                         use_container_width=True,
                         hide_index=True,
                     )
-                st.info(f"🤖 **AI Flow Interpretation**：{interpret_options_flow(options_summary)}")
+                st.info(
+                    "🤖 **AI Flow Interpretation**："
+                    f" {interpret_options_flow(options_summary)}"
+                )
 
     except Exception as e:
         st.error(f"分析時發生未預期錯誤: {e}")
