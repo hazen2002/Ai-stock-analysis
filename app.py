@@ -10,15 +10,6 @@ import streamlit.components.v1 as components
 import yfinance as yf
 
 # Page Configuration
-# Cache single stock data for 1 hour to prevent hitting rate limits
-@st.cache_data(ttl=3600)
-def fetch_stock_data(ticker_symbol):
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-    })
-    ticker = yf.Ticker(ticker_symbol, session=session)
-    return ticker.history(period="1y")
 st.set_page_config(
     page_title="Pro Stock Analysis & Watchlist Platform", page_icon="⚡", layout="wide"
 )
@@ -361,7 +352,7 @@ def get_cnn_fear_and_greed():
     except Exception:
         return None, "CNN unavailable"
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def get_risk_free_rate():
     """Fetches real-time 10-Year US Treasury Yield (^TNX) as Risk-Free Rate"""
     try:
@@ -374,25 +365,15 @@ def get_risk_free_rate():
     return 0.042
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def get_vix_value():
     history = yf.Ticker("^VIX").history(period="5d")
     return float(history["Close"].iloc[-1]) if not history.empty else 20.0
 
 @st.cache_data(ttl=3600)
 def fetch_ticker_data(symbol_str):
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-    })
-    t = yf.Ticker(to_yfinance_symbol(symbol_str), session=session)
-
-    # Fetch info with fallback try-except to prevent N/A crashes
-    try:
-        info = t.info if isinstance(t.info, dict) else {}
-    except Exception:
-        info = {}
-
+    t = yf.Ticker(to_yfinance_symbol(symbol_str))
+    info = t.info or {}
     hist = t.history(period="2y")
     bs = t.balance_sheet
     fin = t.financials
@@ -405,11 +386,8 @@ def fetch_ticker_data(symbol_str):
 
 @st.cache_data(ttl=3600)
 def fetch_scanner_history(symbol_str):
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-    })
-    return yf.Ticker(to_yfinance_symbol(symbol_str), session=session).history(period="6mo", interval="1d")
+    return yf.Ticker(to_yfinance_symbol(symbol_str)).history(period="6mo", interval="1d")
+
 
 def find_dual_divergences(history, lookback_days=90, window=3):
     """Compare RSI and MACD at matching price pivots within the lookback window."""
@@ -946,7 +924,7 @@ def summarize_bollinger_state(df):
     return {"squeeze": squeeze, "tag": tag, "percent_b": float(latest["BB_%B"]), "bandwidth": float(latest["BB_Bandwidth"])}
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def fetch_options_analysis(symbol_str, current_price):
     """Fetch near-term option chains and summarize PCR, IV, max pain, and UOA."""
     try:
