@@ -377,38 +377,38 @@ def get_vix_value():
     history = yf.Ticker("^VIX").history(period="5d")
     return float(history["Close"].iloc[-1]) if not history.empty else 20.0
 
-@st.cache_data(ttl=1800)  # 快取 30 分鐘，降低請求頻率
+@st.cache_data(ttl=1800)  # 快取 30 分鐘，避免高頻請求
 def fetch_ticker_data(symbol_str):
     yf_symbol = to_yfinance_symbol(symbol_str)
-    
-    # 讓 yfinance 自動使用內建的 curl_cffi 處理 Yahoo 驗證（不要傳入 custom session）
     t = yf.Ticker(yf_symbol)
     
-    # 1. 優先獲取 K 線歷史數據
+    # 1. 獲取 K 線歷史數據（重試 3 次）
     hist = pd.DataFrame()
     for attempt in range(3):
         try:
             hist = t.history(period="2y")
             if not hist.empty:
                 break
-        except Exception as e:
-            if "429" in str(e) or "Too Many" in str(e):
-                time.sleep((2 ** attempt) + 1)
-            else:
-                break
+        except Exception:
+            time.sleep(1)
 
-    # 2. 安全讀取 info（若 info 被限流，自動回退使用輕量級 fast_info 備援）
+    # 2. 獲取 info 數據（重試 3 次，防止一下子降級成 N/A）
     info = {}
-    try:
-        info = t.info or {}
-    except Exception:
-        pass
+    for attempt in range(3):
+        try:
+            fetched_info = t.info
+            if fetched_info and isinstance(fetched_info, dict) and len(fetched_info) > 5:
+                info = fetched_info
+                break
+        except Exception:
+            time.sleep(1.5)
 
-    if not info or not info.get("currentPrice"):
+    # 3. 若 t.info 仍被擋，使用 fast_info 與歷年數據做深度備援
+    if not info or "trailingPE" not in info:
         try:
             fast_inf = t.fast_info
             info = {
-                "currentPrice": fast_inf.last_price,
+                "currentPrice": fast_inf.last_price or (hist["Close"].iloc[-1] if not hist.empty else 0),
                 "previousClose": fast_inf.previous_close,
                 "fiftyTwoWeekLow": fast_inf.year_low,
                 "fiftyTwoWeekHigh": fast_inf.year_high,
@@ -416,15 +416,18 @@ def fetch_ticker_data(symbol_str):
                 "shortName": symbol_str,
             }
         except Exception:
-            info = {"shortName": symbol_str}
+            info = {"shortName": symbol_str, "currentPrice": hist["Close"].iloc[-1] if not hist.empty else 0}
 
-    # 3. 獨立讀取財務報表（避免單一報表失敗影響整體）
+    # 4. 獨立安全讀取財務報表
     def safe_get_attr(attr_name):
-        try:
-            val = getattr(t, attr_name)
-            return val if val is not None else pd.DataFrame()
-        except Exception:
-            return pd.DataFrame()
+        for _ in range(2):
+            try:
+                val = getattr(t, attr_name)
+                if val is not None and not val.empty:
+                    return val
+            except Exception:
+                time.sleep(0.5)
+        return pd.DataFrame()
 
     bs = safe_get_attr("balance_sheet")
     fin = safe_get_attr("financials")
@@ -433,8 +436,17 @@ def fetch_ticker_data(symbol_str):
     q_bs = safe_get_attr("quarterly_balance_sheet")
     q_cf = safe_get_attr("quarterly_cashflow")
 
-    return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
+    # 5. 若 info 缺少本益比等關鍵數據，嘗試從財務報表與 K 線算出 (自動補全 N/A)
+    if not info.get("trailingPE") and not fin.empty and "Net Income" in fin.index:
+        try:
+            net_inc = fin.loc["Net Income"].dropna().iloc[0]
+            mkt_cap = info.get("marketCap", 0)
+            if net_inc > 0 and mkt_cap > 0:
+                info["trailingPE"] = mkt_cap / net_inc
+        except Exception:
+            pass
 
+    return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
 
 @st.cache_data(ttl=300)
 def fetch_scanner_history(symbol_str):
