@@ -412,11 +412,7 @@ def fetch_ticker_data(symbol_str):
     def safe_get(attr_name):
         try:
             val = getattr(t, attr_name)
-            return (
-                val
-                if isinstance(val, pd.DataFrame) and not val.empty
-                else pd.DataFrame()
-            )
+            return val if isinstance(val, pd.DataFrame) and not val.empty else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
@@ -427,7 +423,7 @@ def fetch_ticker_data(symbol_str):
     q_bs = safe_get("quarterly_balance_sheet")
     q_cf = safe_get("quarterly_cashflow")
 
-    # 3. Fetch primary info dictionary with retry
+    # 3. Fetch primary info dictionary with quick retry
     info = {}
     for _ in range(2):
         try:
@@ -443,21 +439,13 @@ def fetch_ticker_data(symbol_str):
     try:
         fast_inf = t.fast_info
         if not info.get("currentPrice"):
-            info["currentPrice"] = float(
-                getattr(fast_inf, "last_price", curr_price) or curr_price
-            )
+            info["currentPrice"] = float(getattr(fast_inf, "last_price", curr_price) or curr_price)
         if not info.get("previousClose"):
-            info["previousClose"] = float(
-                getattr(fast_inf, "previous_close", curr_price) or curr_price
-            )
+            info["previousClose"] = float(getattr(fast_inf, "previous_close", curr_price) or curr_price)
         if not info.get("fiftyTwoWeekLow"):
-            info["fiftyTwoWeekLow"] = float(
-                getattr(fast_inf, "year_low", curr_price) or curr_price
-            )
+            info["fiftyTwoWeekLow"] = float(getattr(fast_inf, "year_low", curr_price) or curr_price)
         if not info.get("fiftyTwoWeekHigh"):
-            info["fiftyTwoWeekHigh"] = float(
-                getattr(fast_inf, "year_high", curr_price) or curr_price
-            )
+            info["fiftyTwoWeekHigh"] = float(getattr(fast_inf, "year_high", curr_price) or curr_price)
         if not info.get("marketCap"):
             info["marketCap"] = float(getattr(fast_inf, "market_cap", 0) or 0)
         if not info.get("sharesOutstanding"):
@@ -475,28 +463,20 @@ def fetch_ticker_data(symbol_str):
     TICKER_DEFAULTS = {
         "NVDA": {"industry": "Semiconductors", "sector": "Technology"},
         "AAPL": {"industry": "Consumer Electronics", "sector": "Technology"},
+        "NKE":  {"industry": "Footwear & Accessories", "sector": "Consumer Cyclical"},
         "TSLA": {"industry": "Auto Manufacturers", "sector": "Consumer Cyclical"},
         "MSFT": {"industry": "Software - Infrastructure", "sector": "Technology"},
         "AMZN": {"industry": "Internet Retail", "sector": "Consumer Cyclical"},
-        "GOOG": {
-            "industry": "Internet Content & Information",
-            "sector": "Communication Services",
-        },
-        "GOOGL": {
-            "industry": "Internet Content & Information",
-            "sector": "Communication Services",
-        },
-        "META": {
-            "industry": "Internet Content & Information",
-            "sector": "Communication Services",
-        },
-        "AMD": {"industry": "Semiconductors", "sector": "Technology"},
-        "TSM": {"industry": "Semiconductors", "sector": "Technology"},
+        "GOOG": {"industry": "Internet Content & Information", "sector": "Communication Services"},
+        "GOOGL": {"industry": "Internet Content & Information", "sector": "Communication Services"},
+        "META": {"industry": "Internet Content & Information", "sector": "Communication Services"},
+        "AMD":  {"industry": "Semiconductors", "sector": "Technology"},
+        "TSM":  {"industry": "Semiconductors", "sector": "Technology"},
         "AVGO": {"industry": "Semiconductors", "sector": "Technology"},
         "INTC": {"industry": "Semiconductors", "sector": "Technology"},
         "QCOM": {"industry": "Semiconductors", "sector": "Technology"},
-        "MU": {"industry": "Semiconductors", "sector": "Technology"},
-        "ARM": {"industry": "Semiconductors", "sector": "Technology"},
+        "MU":   {"industry": "Semiconductors", "sector": "Technology"},
+        "ARM":  {"industry": "Semiconductors", "sector": "Technology"},
         "SMCI": {"industry": "Computer Hardware", "sector": "Technology"},
         "DELL": {"industry": "Computer Hardware", "sector": "Technology"},
         "PLTR": {"industry": "Software - Infrastructure", "sector": "Technology"},
@@ -522,11 +502,10 @@ def fetch_ticker_data(symbol_str):
             revenue = get_row(latest_fin, ["Total Revenue", "Operating Revenue"])
             gross_profit = get_row(latest_fin, ["Gross Profit"])
             op_income = get_row(latest_fin, ["Operating Income"])
-            net_income = get_row(
-                latest_fin, ["Net Income", "Net Income Common Stockholders"]
-            )
+            net_income = get_row(latest_fin, ["Net Income", "Net Income Common Stockholders"])
 
             if revenue > 0:
+                info["totalRevenue"] = revenue  # <-- ADD THIS LINE
                 if not info.get("grossMargins") and gross_profit > 0:
                     info["grossMargins"] = gross_profit / revenue
                 if not info.get("operatingMargins") and op_income != 0:
@@ -541,9 +520,7 @@ def fetch_ticker_data(symbol_str):
 
             # Calculate YoY earnings growth for PEG Ratio if missing
             if fin.shape[1] >= 2 and not info.get("earningsGrowth"):
-                prev_net_inc = get_row(
-                    fin.iloc[:, 1], ["Net Income", "Net Income Common Stockholders"]
-                )
+                prev_net_inc = get_row(fin.iloc[:, 1], ["Net Income", "Net Income Common Stockholders"])
                 if prev_net_inc > 0 and net_income != 0:
                     info["earningsGrowth"] = (net_income - prev_net_inc) / prev_net_inc
         except Exception:
@@ -559,20 +536,11 @@ def fetch_ticker_data(symbol_str):
                         return float(df_col[name])
                 return 0.0
 
-            equity = get_row_bs(
-                latest_bs,
-                [
-                    "Stockholders Equity",
-                    "Total Equity Gross Minority Interest",
-                    "Total Stockholder Equity",
-                ],
-            )
+            equity = get_row_bs(latest_bs, ["Stockholders Equity", "Total Equity Gross Minority Interest", "Total Stockholder Equity"])
             assets = get_row_bs(latest_bs, ["Total Assets"])
             curr_assets = get_row_bs(latest_bs, ["Current Assets"])
             curr_liab = get_row_bs(latest_bs, ["Current Liabilities"])
-            inventory = get_row_bs(
-                latest_bs, ["Current Inventory", "Inventory"]
-            )
+            inventory = get_row_bs(latest_bs, ["Current Inventory", "Inventory"])
 
             if not info.get("priceToBook") and equity > 0 and mkt_cap > 0:
                 info["priceToBook"] = mkt_cap / equity
@@ -581,9 +549,7 @@ def fetch_ticker_data(symbol_str):
                 info["quickRatio"] = (curr_assets - inventory) / curr_liab
 
             if not fin.empty and revenue > 0:
-                net_inc_val = get_row(
-                    fin.iloc[:, 0], ["Net Income", "Net Income Common Stockholders"]
-                )
+                net_inc_val = get_row(fin.iloc[:, 0], ["Net Income", "Net Income Common Stockholders"])
                 if not info.get("returnOnEquity") and equity > 0 and net_inc_val != 0:
                     info["returnOnEquity"] = net_inc_val / equity
                 if not info.get("returnOnAssets") and assets > 0 and net_inc_val != 0:
@@ -2730,10 +2696,9 @@ if symbol and app_view == "Stock Analysis":
                 " 趨勢"
             )
 
-            tot_rev_ttm = info.get("totalRevenue", 0) or 0
-            fcf_margin = (
-                (base_fcf / tot_rev_ttm * 100) if tot_rev_ttm > 0 else 0.0
-            )
+            tot_rev_ttm = info.get("totalRevenue") or annual_revenue or 0
+            fcf_margin = (base_fcf / tot_rev_ttm * 100) if tot_rev_ttm > 0 else 0.0
+            
             fcf_per_share = (base_fcf / shares_out) if shares_out > 0 else 0.0
 
             fc1, fc2, fc3, fc4 = st.columns(4)
