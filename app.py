@@ -379,10 +379,20 @@ def get_vix_value():
     history = yf.Ticker("^VIX").history(period="5d")
     return float(history["Close"].iloc[-1]) if not history.empty else 20.0
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def fetch_ticker_data(symbol_str):
-    t = yf.Ticker(to_yfinance_symbol(symbol_str))
-    info = t.info or {}
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+    })
+    t = yf.Ticker(to_yfinance_symbol(symbol_str), session=session)
+
+    # Fetch info with fallback try-except to prevent N/A crashes
+    try:
+        info = t.info if isinstance(t.info, dict) else {}
+    except Exception:
+        info = {}
+
     hist = t.history(period="2y")
     bs = t.balance_sheet
     fin = t.financials
@@ -393,10 +403,13 @@ def fetch_ticker_data(symbol_str):
     return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def fetch_scanner_history(symbol_str):
-    return yf.Ticker(to_yfinance_symbol(symbol_str)).history(period="6mo", interval="1d")
-
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+    })
+    return yf.Ticker(to_yfinance_symbol(symbol_str), session=session).history(period="6mo", interval="1d")
 
 def find_dual_divergences(history, lookback_days=90, window=3):
     """Compare RSI and MACD at matching price pivots within the lookback window."""
