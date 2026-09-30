@@ -1,6 +1,8 @@
 import json
 import urllib.request
 from pathlib import Path
+import time
+import requests
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -9,6 +11,17 @@ import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
 
+# ========================================== #
+#  Yahoo Finance Anti-429 Session Helper     #
+# ========================================== #
+def get_yf_session():
+    """Returns a requests.Session with custom Chrome User-Agent to bypass 429 Rate Limits."""
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    })
+    return session
+    
 # Page Configuration
 st.set_page_config(
     page_title="Pro Stock Analysis & Watchlist Platform", page_icon="⚡", layout="wide"
@@ -370,17 +383,61 @@ def get_vix_value():
     history = yf.Ticker("^VIX").history(period="5d")
     return float(history["Close"].iloc[-1]) if not history.empty else 20.0
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)  # 快取時間延長至 30 分鐘，降低請求總量
 def fetch_ticker_data(symbol_str):
-    t = yf.Ticker(to_yfinance_symbol(symbol_str))
-    info = t.info or {}
-    hist = t.history(period="2y")
-    bs = t.balance_sheet
-    fin = t.financials
-    cf = t.cashflow
-    q_fin = t.quarterly_financials
-    q_bs = t.quarterly_balance_sheet
-    q_cf = t.quarterly_cashflow
+    yf_symbol = to_yfinance_symbol(symbol_str)
+    session = get_yf_session()
+    t = yf.Ticker(yf_symbol, session=session)
+    
+    # 1. 優先獲取 K 線歷史數據（核心基礎）
+    hist = pd.DataFrame()
+    for attempt in range(3):
+        try:
+            hist = t.history(period="2y")
+            if not hist.empty:
+                break
+        except Exception as e:
+            if "429" in str(e) or "Too Many" in str(e):
+                time.sleep((2 ** attempt) + 1)
+            else:
+                break
+
+    # 2. 安全讀取 info (若被 429 阻擋則自動啟用 fast_info 備援)
+    info = {}
+    try:
+        info = t.info or {}
+    except Exception:
+        pass
+
+    if not info or not info.get("currentPrice"):
+        try:
+            fast_inf = t.fast_info
+            info = {
+                "currentPrice": fast_inf.last_price,
+                "previousClose": fast_inf.previous_close,
+                "fiftyTwoWeekLow": fast_inf.year_low,
+                "fiftyTwoWeekHigh": fast_inf.year_high,
+                "marketCap": fast_inf.market_cap,
+                "shortName": symbol_str,
+            }
+        except Exception:
+            info = {"shortName": symbol_str}
+
+    # 3. 獨立讀取財務報表（單一報表失敗不影響整體）
+    def safe_get_attr(attr_name):
+        try:
+            val = getattr(t, attr_name)
+            return val if val is not None else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+    bs = safe_get_attr("balance_sheet")
+    fin = safe_get_attr("financials")
+    cf = safe_get_attr("cashflow")
+    q_fin = safe_get_attr("quarterly_financials")
+    q_bs = safe_get_attr("quarterly_balance_sheet")
+    q_cf = safe_get_attr("quarterly_cashflow")
+
     return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
 
 
@@ -1138,6 +1195,7 @@ if app_view == "Scanner Dashboard":
             ticker_history = fetch_scanner_history(ticker_symbol)
             for signal in find_dual_divergences(ticker_history):
                 scan_rows.append({"Ticker": ticker_symbol, **signal})
+            time.sleep(0.2)    
         except Exception as error:
             scan_errors.append(f"{ticker_symbol}: {error}")
         if scan_progress:
@@ -1196,7 +1254,7 @@ if symbol and app_view == "Stock Analysis":
     try:
         info, df_hist, bs, fin, cf_df, q_fin, q_bs, q_cf = fetch_ticker_data(symbol)
 
-        if not info or ("shortName" not in info and "longName" not in info and df_hist.empty):
+        if df_hist.empty and not info.get("currentPrice"):
             st.error(f"❌ 無法取得股票資料或無效代碼: {symbol}")
         else:
             base_val = None
