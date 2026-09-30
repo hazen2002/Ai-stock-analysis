@@ -403,14 +403,16 @@ def fetch_ticker_data(symbol_str):
     q_bs = safe_get("quarterly_balance_sheet")
     q_cf = safe_get("quarterly_cashflow")
 
-    # 3. Attempt to fetch primary info dictionary
+    # 3. Attempt to fetch primary info dictionary with quick retry
     info = {}
-    try:
-        fetched_info = t.info
-        if isinstance(fetched_info, dict) and len(fetched_info) > 5:
-            info = fetched_info.copy()
-    except Exception:
-        info = {}
+    for _ in range(2):
+        try:
+            fetched_info = t.info
+            if isinstance(fetched_info, dict) and len(fetched_info) > 5:
+                info = fetched_info.copy()
+                break
+        except Exception:
+            time.sleep(0.3)
 
     # 4. Fill price, market cap, and shares from fast_info if t.info was blocked
     curr_price = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
@@ -493,13 +495,19 @@ def fetch_ticker_data(symbol_str):
                 info["quickRatio"] = (curr_assets - inventory) / curr_liab
 
             if not fin.empty and revenue > 0:
-                net_income = get_row(fin.iloc[:, 0], ["Net Income", "Net Income Common Stockholders"])
-                if not info.get("returnOnEquity") and equity > 0 and net_income != 0:
-                    info["returnOnEquity"] = net_income / equity
-                if not info.get("returnOnAssets") and assets > 0 and net_income != 0:
-                    info["returnOnAssets"] = net_income / assets
+                net_inc_val = get_row(fin.iloc[:, 0], ["Net Income", "Net Income Common Stockholders"])
+                if not info.get("returnOnEquity") and equity > 0 and net_inc_val != 0:
+                    info["returnOnEquity"] = net_inc_val / equity
+                if not info.get("returnOnAssets") and assets > 0 and net_inc_val != 0:
+                    info["returnOnAssets"] = net_inc_val / assets
         except Exception:
             pass
+
+    # 6. Derive PEG Ratio if missing using calculated P/E and earnings growth
+    if not info.get("pegRatio") and info.get("trailingPE"):
+        earnings_g = info.get("earningsGrowth")
+        if isinstance(earnings_g, (int, float)) and earnings_g > 0:
+            info["pegRatio"] = info["trailingPE"] / (earnings_g * 100)
 
     return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
     
