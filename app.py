@@ -7,8 +7,17 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 import streamlit.components.v1 as components
-import yfinance as yf
-
+import requests
+import time
+# Cache stock data for 1 hour (3600 seconds) to avoid hitting Yahoo Finance rate limits
+@st.cache_data(ttl=3600)
+def fetch_stock_data(ticker_symbol):
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+    })
+    ticker = yf.Ticker(ticker_symbol, session=session)
+    return ticker.history(period="1y")
 # Page Configuration
 st.set_page_config(
     page_title="Pro Stock Analysis & Watchlist Platform", page_icon="⚡", layout="wide"
@@ -1136,6 +1145,7 @@ if app_view == "Scanner Dashboard":
     for ticker_index, ticker_symbol in enumerate(st.session_state.watchlist, start=1):
         try:
             ticker_history = fetch_scanner_history(ticker_symbol)
+            time.sleep(0.5)
             for signal in find_dual_divergences(ticker_history):
                 scan_rows.append({"Ticker": ticker_symbol, **signal})
         except Exception as error:
