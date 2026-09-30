@@ -1,5 +1,16 @@
 import json
+import time
 import urllib.request
+import requests
+import yfinance as yf
+
+# 新增 Session 建立函式，模擬真實 Chrome 瀏覽器 Header
+def get_yf_session():
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+    return session
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -7,7 +18,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 import streamlit.components.v1 as components
-import yfinance as yf
+
 
 # Page Configuration
 st.set_page_config(
@@ -352,11 +363,12 @@ def get_cnn_fear_and_greed():
     except Exception:
         return None, "CNN unavailable"
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)  # 提高 ttl 至 30 分鐘，減少背景查詢頻率
 def get_risk_free_rate():
     """Fetches real-time 10-Year US Treasury Yield (^TNX) as Risk-Free Rate"""
     try:
-        tnx = yf.Ticker("^TNX")
+        session = get_yf_session()
+        tnx = yf.Ticker("^TNX", session=session)
         tnx_hist = tnx.history(period="5d")
         if not tnx_hist.empty:
             return float(tnx_hist["Close"].iloc[-1]) / 100.0
@@ -364,24 +376,57 @@ def get_risk_free_rate():
         pass
     return 0.042
 
-
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def get_vix_value():
-    history = yf.Ticker("^VIX").history(period="5d")
-    return float(history["Close"].iloc[-1]) if not history.empty else 20.0
+    try:
+        session = get_yf_session()
+        history = yf.Ticker("^VIX", session=session).history(period="5d")
+        return float(history["Close"].iloc[-1]) if not history.empty else 20.0
+    except Exception:
+        return 20.0
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)  # 將 ttl 延長至 3600 秒 (1小時) 減少請求頻率
 def fetch_ticker_data(symbol_str):
-    t = yf.Ticker(to_yfinance_symbol(symbol_str))
-    info = t.info or {}
-    hist = t.history(period="2y")
-    bs = t.balance_sheet
-    fin = t.financials
-    cf = t.cashflow
-    q_fin = t.quarterly_financials
-    q_bs = t.quarterly_balance_sheet
-    q_cf = t.quarterly_cashflow
-    return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
+    yf_symbol = to_yfinance_symbol(symbol_str)
+    session = get_yf_session()
+    
+    # 指數退避重試機制 (最多重試 3 次)
+    for attempt in range(3):
+        try:
+            t = yf.Ticker(yf_symbol, session=session)
+            
+            # 優先獲取 K 線歷史數據 (成功率高)
+            hist = t.history(period="2y")
+            
+            # 安全讀取 info 與財務報表，避免個別欄位 429 導致全盤崩潰
+            try:
+                info = t.info or {}
+            except Exception:
+                info = {}
+                
+            try:
+                bs = t.balance_sheet
+                fin = t.financials
+                cf = t.cashflow
+                q_fin = t.quarterly_financials
+                q_bs = t.quarterly_balance_sheet
+                q_cf = t.quarterly_cashflow
+            except Exception:
+                import pandas as pd
+                bs = fin = cf = q_fin = q_bs = q_cf = pd.DataFrame()
+            
+            return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
+
+        except Exception as e:
+            if "429" in str(e) or "Too Many Requests" in str(e):
+                # 遇到 Rate Limit 時等待 2s, 5s...
+                time.sleep((2 ** attempt) + 1)
+            else:
+                break
+
+    # 若多次重試均失敗，返回空結構避免 Streamlit 直接報錯拋出異常
+    import pandas as pd
+    return {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
