@@ -14,13 +14,7 @@ import yfinance as yf
 # ========================================== #
 #  Yahoo Finance Anti-429 Session Helper     #
 # ========================================== #
-def get_yf_session():
-    """Returns a requests.Session with custom Chrome User-Agent to bypass 429 Rate Limits."""
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-    })
-    return session
+
     
 # Page Configuration
 st.set_page_config(
@@ -383,13 +377,14 @@ def get_vix_value():
     history = yf.Ticker("^VIX").history(period="5d")
     return float(history["Close"].iloc[-1]) if not history.empty else 20.0
 
-@st.cache_data(ttl=1800)  # 快取時間延長至 30 分鐘，降低請求總量
+@st.cache_data(ttl=1800)  # 快取 30 分鐘，降低請求頻率
 def fetch_ticker_data(symbol_str):
     yf_symbol = to_yfinance_symbol(symbol_str)
-    session = get_yf_session()
-    t = yf.Ticker(yf_symbol, session=session)
     
-    # 1. 優先獲取 K 線歷史數據（核心基礎）
+    # 讓 yfinance 自動使用內建的 curl_cffi 處理 Yahoo 驗證（不要傳入 custom session）
+    t = yf.Ticker(yf_symbol)
+    
+    # 1. 優先獲取 K 線歷史數據
     hist = pd.DataFrame()
     for attempt in range(3):
         try:
@@ -402,7 +397,7 @@ def fetch_ticker_data(symbol_str):
             else:
                 break
 
-    # 2. 安全讀取 info (若被 429 阻擋則自動啟用 fast_info 備援)
+    # 2. 安全讀取 info（若 info 被限流，自動回退使用輕量級 fast_info 備援）
     info = {}
     try:
         info = t.info or {}
@@ -423,7 +418,7 @@ def fetch_ticker_data(symbol_str):
         except Exception:
             info = {"shortName": symbol_str}
 
-    # 3. 獨立讀取財務報表（單一報表失敗不影響整體）
+    # 3. 獨立讀取財務報表（避免單一報表失敗影響整體）
     def safe_get_attr(attr_name):
         try:
             val = getattr(t, attr_name)
