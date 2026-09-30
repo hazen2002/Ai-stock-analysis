@@ -377,151 +377,36 @@ def get_vix_value():
     history = yf.Ticker("^VIX").history(period="5d")
     return float(history["Close"].iloc[-1]) if not history.empty else 20.0
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)  # Extended cache to 1 hour to reduce Yahoo API calls
 def fetch_ticker_data(symbol_str):
     yf_symbol = to_yfinance_symbol(symbol_str)
     t = yf.Ticker(yf_symbol)
-
-    # 1. 抓取價格 K 線
-    try:
-        hist = yf.download(yf_symbol, period="2y", progress=False)
-        if isinstance(hist.columns, pd.MultiIndex):
-            hist.columns = hist.columns.get_level_values(0)
-    except Exception:
-        hist = pd.DataFrame()
-
-    current_p = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
-
-    # 2. 獲取 fast_info 並推算流通股數 (sharesOutstanding)
-    info = {
-        "shortName": symbol_str,
-        "currentPrice": current_p,
-        "previousClose": current_p,
-        "fiftyTwoWeekLow": current_p * 0.7,
-        "fiftyTwoWeekHigh": current_p * 1.2,
-        "marketCap": 0.0,
-        "sharesOutstanding": 0.0,
-    }
-
-    try:
-        fast_inf = t.fast_info
-        info["currentPrice"] = float(getattr(fast_inf, "last_price", current_p) or current_p)
-        info["previousClose"] = float(getattr(fast_inf, "previous_close", current_p) or current_p)
-        info["fiftyTwoWeekLow"] = float(getattr(fast_inf, "year_low", current_p) or current_p)
-        info["fiftyTwoWeekHigh"] = float(getattr(fast_inf, "year_high", current_p) or current_p)
-        info["marketCap"] = float(getattr(fast_inf, "market_cap", 0) or 0)
-        
-        # 【關鍵修復 1】：當 t.info 遭封鎖時，由市值/當前股價推算流通股數，供 DCF 模型使用
-        shares = getattr(fast_inf, "shares", 0) or getattr(fast_inf, "shares_outstanding", 0)
-        if not shares and info["marketCap"] > 0 and info["currentPrice"] > 0:
-            shares = info["marketCap"] / info["currentPrice"]
-        info["sharesOutstanding"] = float(shares or 0)
-    except Exception:
-        pass
-
-    # 3. 嘗試讀取 full info
-    try:
-        full_info = t.info
-        if isinstance(full_info, dict) and len(full_info) > 5:
-            info.update(full_info)
-    except Exception:
-        pass
-
-    # 【關鍵修復 2】：熱門標的產業類別備援 (避免同業基準顯示為 General)
-    TICKER_DEFAULTS = {
-        "NVDA": {"industry": "Semiconductors", "sector": "Technology"},
-        "AAPL": {"industry": "Consumer Electronics", "sector": "Technology"},
-        "TSLA": {"industry": "Auto Manufacturers", "sector": "Consumer Cyclical"},
-        "MSFT": {"industry": "Software - Infrastructure", "sector": "Technology"},
-        "AMZN": {"industry": "Internet Retail", "sector": "Consumer Cyclical"},
-        "GOOG": {"industry": "Internet Content & Information", "sector": "Communication Services"},
-        "GOOGL": {"industry": "Internet Content & Information", "sector": "Communication Services"},
-        "META": {"industry": "Internet Content & Information", "sector": "Communication Services"},
-        "AMD": {"industry": "Semiconductors", "sector": "Technology"},
-        "TSM": {"industry": "Semiconductors", "sector": "Technology"},
-        "AVGO": {"industry": "Semiconductors", "sector": "Technology"},
-    }
-    clean_sym = symbol_str.replace(".US", "").upper()
-    if not info.get("industry") and clean_sym in TICKER_DEFAULTS:
-        info["industry"] = TICKER_DEFAULTS[clean_sym]["industry"]
-        info["sector"] = TICKER_DEFAULTS[clean_sym]["sector"]
-
-    # 4. 讀取財務報表
-    def quick_get_df(attr_name):
-        try:
-            val = getattr(t, attr_name)
-            return val if val is not None and isinstance(val, pd.DataFrame) else pd.DataFrame()
-        except Exception:
-            return pd.DataFrame()
-
-    bs = quick_get_df("balance_sheet")
-    fin = quick_get_df("financials")
-    cf = quick_get_df("cashflow")
-    q_fin = quick_get_df("quarterly_financials")
-    q_bs = quick_get_df("quarterly_balance_sheet")
-    q_cf = quick_get_df("quarterly_cashflow")
-
-    # 5. 從財務報表動態計算比率 (P/S, P/B, Quick Ratio, Margins, ROE, ROA)
-    mkt_cap = info.get("marketCap", 0)
     
-    if not fin.empty:
-        try:
-            latest_fin = fin.iloc[:, 0]
-            revenue = float(latest_fin.get("Total Revenue", 0) or 0)
-            gross_profit = float(latest_fin.get("Gross Profit", 0) or 0)
-            op_income = float(latest_fin.get("Operating Income", 0) or 0)
-            net_income = float(latest_fin.get("Net Income", 0) or latest_fin.get("Net Income Common Stockholders", 0) or 0)
+    # Helper to fetch each statement with automatic rate-limit cooldown
+    def safe_fetch(get_fn, default_val):
+        for attempt in range(3):
+            try:
+                res = get_fn()
+                if res is not None and not (isinstance(res, pd.DataFrame) and res.empty):
+                    return res
+                # Slight pause between consecutive properties
+                time.sleep(0.2)
+            except Exception as e:
+                if "429" in str(e) or "Too Many" in str(e):
+                    time.sleep(1.5 * (attempt + 1))  # Exponential backoff on rate limit
+                else:
+                    break
+        return default_val if default_val is not None else pd.DataFrame()
 
-            if revenue > 0:
-                if not info.get("grossMargins"): info["grossMargins"] = gross_profit / revenue
-                if not info.get("operatingMargins"): info["operatingMargins"] = op_income / revenue
-                if not info.get("profitMargins"): info["profitMargins"] = net_income / revenue
-                if not info.get("priceToSalesTrailing12Months") and mkt_cap > 0:
-                    info["priceToSalesTrailing12Months"] = mkt_cap / revenue
-
-            if not info.get("trailingPE") and net_income > 0 and mkt_cap > 0:
-                info["trailingPE"] = mkt_cap / net_income
-        except Exception:
-            pass
-
-    if not bs.empty:
-        try:
-            latest_bs = bs.iloc[:, 0]
-            equity = float(latest_bs.get("Stockholders Equity", 0) or latest_bs.get("Total Equity Gross Minority Interest", 0) or 0)
-            assets = float(latest_bs.get("Total Assets", 0) or 0)
-            curr_assets = float(latest_bs.get("Current Assets", 0) or 0)
-            inventory = float(latest_bs.get("Current Inventory", latest_bs.get("Inventory", 0)) or 0)
-            curr_liab = float(latest_bs.get("Current Liabilities", 0) or 0)
-
-            if not info.get("priceToBook") and equity > 0 and mkt_cap > 0:
-                info["priceToBook"] = mkt_cap / equity
-
-            # 【關鍵修復 3】：計算 Quick Ratio
-            if not info.get("quickRatio") and curr_liab > 0:
-                info["quickRatio"] = (curr_assets - inventory) / curr_liab
-
-            if not fin.empty and revenue > 0:
-                net_income = float(fin.iloc[:, 0].get("Net Income", 0) or 0)
-                if not info.get("returnOnEquity") and equity > 0: info["returnOnEquity"] = net_income / equity
-                if not info.get("returnOnAssets") and assets > 0: info["returnOnAssets"] = net_income / assets
-        except Exception:
-            pass
-
-    # 6. 保底防護網 (避免全部顯示 N/A)
-    default_fallbacks = {
-        "grossMargins": 0.65 if "NVDA" in symbol_str.upper() else 0.40,
-        "operatingMargins": 0.55 if "NVDA" in symbol_str.upper() else 0.20,
-        "profitMargins": 0.48 if "NVDA" in symbol_str.upper() else 0.15,
-        "priceToSalesTrailing12Months": 25.0 if "NVDA" in symbol_str.upper() else 3.5,
-        "priceToBook": 35.0 if "NVDA" in symbol_str.upper() else 4.0,
-        "returnOnEquity": 0.75 if "NVDA" in symbol_str.upper() else 0.18,
-        "returnOnAssets": 0.35 if "NVDA" in symbol_str.upper() else 0.08,
-        "trailingPE": 45.0 if "NVDA" in symbol_str.upper() else 22.0,
-    }
-
-    for key, val in default_fallbacks.items():
-        if not info.get(key) or pd.isna(info.get(key)):
-            info[key] = val
+    # Retrieve all 8 properties with pacing to prevent 429 rate limits
+    info = safe_fetch(lambda: t.info or {}, {})
+    hist = safe_fetch(lambda: t.history(period="2y"), pd.DataFrame())
+    bs = safe_fetch(lambda: t.balance_sheet, pd.DataFrame())
+    fin = safe_fetch(lambda: t.financials, pd.DataFrame())
+    cf = safe_fetch(lambda: t.cashflow, pd.DataFrame())
+    q_fin = safe_fetch(lambda: t.quarterly_financials, pd.DataFrame())
+    q_bs = safe_fetch(lambda: t.quarterly_balance_sheet, pd.DataFrame())
+    q_cf = safe_fetch(lambda: t.quarterly_cashflow, pd.DataFrame())
 
     return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
     
