@@ -661,24 +661,35 @@ def find_dual_divergences(history, lookback_days=90, window=3):
 
 
 def calculate_signal_win_rate(history):
-    required = {"Close", "High"}
+    required = {"Close", "High", "Low"}
     if history.empty or not required.issubset(history.columns):
-        return "N/A"
+        return 0, 0
 
     data = calculate_synchronized_macd(history.copy().sort_index())
     signal_indexes = np.flatnonzero(data["Signal_Hist_Turn"].to_numpy())
-    if len(signal_indexes) == 0:
-        return "N/A"
-
-    wins = 0
     highs = data["High"].to_numpy(dtype=float)
+    lows = data["Low"].to_numpy(dtype=float)
     closes = data["Close"].to_numpy(dtype=float)
-    for signal_index in signal_indexes:
-        future_highs = highs[signal_index + 1 : signal_index + 11]
-        if len(future_highs) and np.nanmax(future_highs) > closes[signal_index] * 1.15:
-            wins += 1
+    wins = 0
+    evaluated_signals = 0
 
-    return f"{wins / len(signal_indexes) * 100:.1f}%"
+    for signal_index in signal_indexes:
+        if signal_index + 30 >= len(data):
+            continue
+
+        entry_price = closes[signal_index]
+        stop_price = entry_price * 0.95
+        target_price = entry_price * 1.15
+        evaluated_signals += 1
+
+        for future_index in range(signal_index + 1, signal_index + 31):
+            if lows[future_index] <= stop_price:
+                break
+            if highs[future_index] >= target_price:
+                wins += 1
+                break
+
+    return wins, evaluated_signals
 
 
 def map_symbol_for_tradingview(symbol_input):
@@ -1628,6 +1639,8 @@ if app_view == "Scanner Dashboard":
     )
     scan_rows = []
     scan_errors = []
+    total_win_signals = 0
+    total_triggered_signals = 0
     total_tickers = len(st.session_state.watchlist)
     scan_progress = (
         st.progress(0, text="Scanning saved watchlist...")
@@ -1639,7 +1652,14 @@ if app_view == "Scanner Dashboard":
     ):
         try:
             ticker_history = fetch_scanner_history(ticker_symbol)
-            signal_win_rate = calculate_signal_win_rate(ticker_history)
+            ticker_wins, ticker_signals = calculate_signal_win_rate(ticker_history)
+            total_win_signals += ticker_wins
+            total_triggered_signals += ticker_signals
+            signal_win_rate = (
+                f"{ticker_wins / ticker_signals * 100:.1f}%"
+                if ticker_signals
+                else "N/A"
+            )
             for signal in find_dual_divergences(ticker_history):
                 scan_rows.append({
                     "Ticker": ticker_symbol,
@@ -1671,6 +1691,15 @@ if app_view == "Scanner Dashboard":
     metric_bull.metric("🚀 Bullish alerts", bullish_count)
     metric_bear.metric("🚨 Bearish alerts", bearish_count)
     metric_total.metric("Watchlist tickers", len(st.session_state.watchlist))
+    total_system_win_rate = (
+        f"{total_win_signals / total_triggered_signals * 100:.1f}%"
+        if total_triggered_signals
+        else "N/A"
+    )
+    st.metric(
+        "Total Signal Detector Win Rate (30D | +15% Target | -5% Stop)",
+        total_system_win_rate,
+    )
     if scan_errors:
         with st.expander(f"Unavailable symbols ({len(scan_errors)})"):
             st.caption(
