@@ -10,6 +10,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
+from ta_utils import calculate_synchronized_macd
 
 # Page Configuration
 st.set_page_config(
@@ -569,7 +570,7 @@ def fetch_ticker_data(symbol_str):
 @st.cache_data(ttl=300)
 def fetch_scanner_history(symbol_str):
     return yf.Ticker(to_yfinance_symbol(symbol_str)).history(
-        period="6mo", interval="1d"
+        period="1y", interval="1d"
     )
 
 
@@ -581,10 +582,7 @@ def find_dual_divergences(history, lookback_days=90, window=3):
 
     data = history.copy().dropna(subset=["High", "Low", "Close"]).sort_index()
     data["RSI"] = calculate_rsi(data["Close"], 14)
-    data["MACD"] = (
-        data["Close"].ewm(span=12, adjust=False).mean()
-        - data["Close"].ewm(span=26, adjust=False).mean()
-    )
+    data = calculate_synchronized_macd(data)
     cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=lookback_days)
     if getattr(data.index, "tz", None) is not None:
         cutoff = cutoff.tz_localize(data.index.tz)
@@ -660,6 +658,27 @@ def find_dual_divergences(history, lookback_days=90, window=3):
                     "Second MACD": macd_2,
                 })
     return sorted(signals, key=lambda signal: signal["Trigger Date"])
+
+
+def calculate_signal_win_rate(history):
+    required = {"Close", "High"}
+    if history.empty or not required.issubset(history.columns):
+        return "N/A"
+
+    data = calculate_synchronized_macd(history.copy().sort_index())
+    signal_indexes = np.flatnonzero(data["Signal_Hist_Turn"].to_numpy())
+    if len(signal_indexes) == 0:
+        return "N/A"
+
+    wins = 0
+    highs = data["High"].to_numpy(dtype=float)
+    closes = data["Close"].to_numpy(dtype=float)
+    for signal_index in signal_indexes:
+        future_highs = highs[signal_index + 1 : signal_index + 11]
+        if len(future_highs) and np.nanmax(future_highs) > closes[signal_index] * 1.15:
+            wins += 1
+
+    return f"{wins / len(signal_indexes) * 100:.1f}%"
 
 
 def map_symbol_for_tradingview(symbol_input):
@@ -1604,7 +1623,7 @@ def open_scanner_signal():
 if app_view == "Scanner Dashboard":
     st.title("📡 Watchlist Dual Divergence Scanner")
     st.caption(
-        "Daily RSI(14) and MACD(12,26,9) must confirm at the same price-pivot"
+        "Daily RSI(14) and MACD(8,17,9) must confirm at the same price-pivot"
         " candle within the last 90 calendar days."
     )
     scan_rows = []
@@ -1620,8 +1639,13 @@ if app_view == "Scanner Dashboard":
     ):
         try:
             ticker_history = fetch_scanner_history(ticker_symbol)
+            signal_win_rate = calculate_signal_win_rate(ticker_history)
             for signal in find_dual_divergences(ticker_history):
-                scan_rows.append({"Ticker": ticker_symbol, **signal})
+                scan_rows.append({
+                    "Ticker": ticker_symbol,
+                    **signal,
+                    "Signal Win Rate (%)": signal_win_rate,
+                })
         except Exception as error:
             scan_errors.append(f"{ticker_symbol}: {error}")
         if scan_progress:
@@ -1675,6 +1699,7 @@ if app_view == "Scanner Dashboard":
             "Change (%)",
             "RSI",
             "MACD",
+            "Signal Win Rate (%)",
         ]].copy()
         display_frame["Trigger Date"] = display_frame["Trigger Date"].map(
             lambda trigger_date: pd.Timestamp(trigger_date).strftime("%Y-%m-%d")
@@ -2906,17 +2931,7 @@ if symbol and app_view == "Stock Analysis":
                             ma250_valid = False
                             ma250_val = 0.0
 
-                        ema12 = (
-                            df_hist["Close"].ewm(span=12, adjust=False).mean()
-                        )
-                        ema26 = (
-                            df_hist["Close"].ewm(span=26, adjust=False).mean()
-                        )
-                        df_hist["MACD"] = ema12 - ema26
-                        df_hist["Signal"] = (
-                            df_hist["MACD"].ewm(span=9, adjust=False).mean()
-                        )
-                        df_hist["Hist"] = df_hist["MACD"] - df_hist["Signal"]
+                        df_hist = calculate_synchronized_macd(df_hist)
 
                         trend_status, trend_desc = classify_trend_status(df_hist)
 
@@ -3121,7 +3136,7 @@ if symbol and app_view == "Stock Analysis":
                     subplot_titles=(
                         "Price / EMA20 / EMA50",
                         "RSI (14)",
-                        "MACD (12,26,9)",
+                        "MACD (8,17,9)",
                     ),
                 )
                 fig_k.add_trace(
@@ -3325,7 +3340,7 @@ if symbol and app_view == "Stock Analysis":
                 fig_k.add_trace(
                     go.Scatter(
                         x=df_hist.index,
-                        y=df_hist["Signal"],
+                        y=df_hist["MACD_Signal"],
                         name="Signal",
                         line=dict(color="orange"),
                     ),
@@ -3335,13 +3350,22 @@ if symbol and app_view == "Stock Analysis":
                 fig_k.add_trace(
                     go.Bar(
                         x=df_hist.index,
-                        y=df_hist["Hist"],
+                        y=df_hist["MACD_Hist"],
                         name="Hist",
                         marker_color="gray",
                     ),
                     row=3,
                     col=1,
                 )
+
+                for trigger_date in df_hist.index[df_hist["Signal_Hist_Turn"]]:
+                    fig_k.add_vline(
+                        x=trigger_date,
+                        line_dash="dash",
+                        line_color="#00BFA5",
+                        row=1,
+                        col=1,
+                    )
 
                 scanner_signal = st.session_state.get("selected_scanner_signal")
                 if scanner_signal and scanner_signal.get("Ticker") == symbol:
