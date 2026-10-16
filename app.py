@@ -1968,17 +1968,49 @@ if app_view == "💼 Portfolio & Secondary Allocator":
         "Ticker",
         "Category",
         "Beta",
+        "Quantity",
+        "Average Cost ($)",
         "Last Price ($)",
         "Position Value ($)",
+        "Unrealized P/L ($)",
     ]
-    if "portfolio_holdings" not in st.session_state:
-        st.session_state.portfolio_holdings = pd.DataFrame({
-            "Ticker": pd.Series(dtype=object),
-            "Category": pd.Series(dtype=object),
-            "Beta": pd.Series(dtype=float),
-            "Last Price ($)": pd.Series(dtype=float),
-            "Position Value ($)": pd.Series(dtype=float),
-        })
+    portfolio_holdings = st.session_state.get("portfolio_holdings")
+    if not isinstance(portfolio_holdings, pd.DataFrame):
+        portfolio_holdings = pd.DataFrame(columns=holding_columns)
+    else:
+        portfolio_holdings = portfolio_holdings.copy()
+        if "Quantity" not in portfolio_holdings:
+            old_values = pd.to_numeric(
+                portfolio_holdings.get(
+                    "Position Value ($)", pd.Series(0.0, index=portfolio_holdings.index)
+                ),
+                errors="coerce",
+            ).fillna(0.0)
+            old_prices = pd.to_numeric(
+                portfolio_holdings.get(
+                    "Last Price ($)", pd.Series(0.0, index=portfolio_holdings.index)
+                ),
+                errors="coerce",
+            ).fillna(0.0)
+            portfolio_holdings["Quantity"] = np.where(
+                old_prices > 0, old_values / old_prices, 0.0
+            )
+        if "Average Cost ($)" not in portfolio_holdings:
+            portfolio_holdings["Average Cost ($)"] = portfolio_holdings.get(
+                "Last Price ($)", 0.0
+            )
+        for column, default in (
+            ("Ticker", ""),
+            ("Category", "Other"),
+            ("Beta", 1.0),
+            ("Last Price ($)", 0.0),
+            ("Position Value ($)", 0.0),
+            ("Unrealized P/L ($)", 0.0),
+        ):
+            if column not in portfolio_holdings:
+                portfolio_holdings[column] = default
+        portfolio_holdings = portfolio_holdings.reindex(columns=holding_columns)
+    st.session_state.portfolio_holdings = portfolio_holdings
 
     capital_col, cash_col = st.columns(2)
     with capital_col:
@@ -2033,8 +2065,11 @@ if app_view == "💼 Portfolio & Secondary Allocator":
                 "Ticker": ticker_to_add,
                 "Category": "High-Beta Satellite",
                 "Beta": beta,
+                "Quantity": 0.0,
+                "Average Cost ($)": last_price,
                 "Last Price ($)": last_price,
                 "Position Value ($)": 0.0,
+                "Unrealized P/L ($)": 0.0,
             }])
             st.session_state.portfolio_holdings = pd.concat(
                 [holdings, new_holding], ignore_index=True
@@ -2045,7 +2080,7 @@ if app_view == "💼 Portfolio & Secondary Allocator":
     base_holdings = st.session_state.portfolio_holdings.copy()
     edited_holdings = st.data_editor(
         base_holdings,
-        key="portfolio_holdings_editor",
+        key="portfolio_holdings_editor_v2",
         num_rows="dynamic",
         hide_index=True,
         use_container_width=True,
@@ -2057,11 +2092,20 @@ if app_view == "💼 Portfolio & Secondary Allocator":
             "Beta": st.column_config.NumberColumn(
                 "Beta", min_value=-5.0, max_value=10.0, step=0.05, format="%.2f"
             ),
+            "Quantity": st.column_config.NumberColumn(
+                "Quantity", min_value=0.0, step=1.0, format="%.4f"
+            ),
+            "Average Cost ($)": st.column_config.NumberColumn(
+                "Average Cost ($)", min_value=0.0, step=0.01, format="$%.2f"
+            ),
             "Last Price ($)": st.column_config.NumberColumn(
                 "Last Price ($)", format="$%.2f", disabled=True
             ),
             "Position Value ($)": st.column_config.NumberColumn(
-                "Position Value ($)", min_value=0.0, step=100.0, format="$%.2f"
+                "Position Value ($)", format="$%.2f", disabled=True
+            ),
+            "Unrealized P/L ($)": st.column_config.NumberColumn(
+                "Unrealized P/L ($)", format="$%.2f", disabled=True
             ),
         },
     )
@@ -2088,20 +2132,29 @@ if app_view == "💼 Portfolio & Secondary Allocator":
         ).iloc[0]
         if ticker_value != old_ticker or pd.isna(beta_value) or pd.isna(price_value):
             beta_value, price_value = fetch_portfolio_quote(ticker_value)
-            edited_holdings.iat[row_position, 2] = beta_value
-            edited_holdings.iat[row_position, 3] = price_value
+            edited_holdings.at[row_position, "Beta"] = beta_value
+            edited_holdings.at[row_position, "Last Price ($)"] = price_value
         category_value = edited_holdings.iloc[row_position]["Category"]
         if pd.isna(category_value) or category_value not in categories:
             edited_holdings.iat[row_position, 1] = "Other"
     edited_holdings["Beta"] = pd.to_numeric(
         edited_holdings["Beta"], errors="coerce"
     ).fillna(1.0)
+    edited_holdings["Quantity"] = pd.to_numeric(
+        edited_holdings["Quantity"], errors="coerce"
+    ).fillna(0.0).clip(lower=0.0)
+    edited_holdings["Average Cost ($)"] = pd.to_numeric(
+        edited_holdings["Average Cost ($)"], errors="coerce"
+    ).fillna(0.0).clip(lower=0.0)
     edited_holdings["Last Price ($)"] = pd.to_numeric(
         edited_holdings["Last Price ($)"], errors="coerce"
     ).fillna(0.0)
-    edited_holdings["Position Value ($)"] = pd.to_numeric(
-        edited_holdings["Position Value ($)"], errors="coerce"
-    ).fillna(0.0).clip(lower=0.0)
+    edited_holdings["Position Value ($)"] = (
+        edited_holdings["Quantity"] * edited_holdings["Last Price ($)"]
+    )
+    edited_holdings["Unrealized P/L ($)"] = (
+        edited_holdings["Last Price ($)"] - edited_holdings["Average Cost ($)"]
+    ) * edited_holdings["Quantity"]
     st.session_state.portfolio_holdings = edited_holdings.reset_index(drop=True)
 
     positions_total = float(edited_holdings["Position Value ($)"].sum())
