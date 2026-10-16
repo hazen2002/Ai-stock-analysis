@@ -1,4 +1,5 @@
 import json
+import datetime
 import urllib.request
 from pathlib import Path
 import time
@@ -319,15 +320,58 @@ with st.sidebar.expander(f"Saved tickers ({len(st.session_state.watchlist)})"):
         st.caption("The watchlist is empty.")
 
 st.sidebar.caption("Only saved tickers are scanned.")
+
+
+def get_seasonal_roadmap_context(today=None):
+    today = today or datetime.date.today()
+    if (today.month == 10 and today.day >= 15) or (
+        today.month == 11 and today.day <= 6
+    ):
+        return (
+            "warning",
+            "Election/FOMC Liquidity Sweep Window: Strict Observation Mode. Do NOT"
+            " average down on the left side. Wait for right-side trigger"
+            " (Signal_Hist_Turn == True + RSI/CPD Bullish Divergence).",
+        )
+    if (today.month == 11 and today.day >= 7) or today.month == 12 or (
+        today.month == 1 and today.day <= 15
+    ):
+        return (
+            "success",
+            "Post-Election & Year-End Rally: V-shaped recovery phase. Hold core"
+            " positions. Take 30% profits on high-beta satellites (APLD, NBIS,"
+            " BE) around mid-January.",
+        )
+    if (today.month == 1 and today.day >= 16) or today.month == 2:
+        return (
+            "info",
+            "Feb Seasonal Pullback & Portfolio Rebalancing: Secondary add window"
+            " for core quality stocks.",
+        )
+    if 3 <= today.month <= 7:
+        return (
+            "success",
+            "Spring/Summer Golden Bull Run: Peak seasonal strength. Watch for the"
+            " Semiconductor Annual Seasonal Peak around July 18-28.",
+        )
+    return "warning", "Summer Doldrums / September Effect: Capital preservation mode."
+
+
 app_view = st.radio(
     "Workspace",
-    ["Scanner Dashboard", "Stock Analysis"],
+    [
+        "Scanner Dashboard",
+        "Stock Analysis",
+        "💼 Portfolio & Secondary Allocator",
+    ],
     horizontal=True,
     key="app_view",
 )
 selected_from_watchlist = "-- Select --"
 if app_view == "Stock Analysis":
     st.title("⚡ Livermore & Lynch 機構級股票分析平台")
+    banner_style, banner_message = get_seasonal_roadmap_context()
+    getattr(st, banner_style)(banner_message)
     selected_from_watchlist = st.sidebar.selectbox(
         "Quick switch", ["-- Select --"] + st.session_state.watchlist
     )
@@ -572,6 +616,19 @@ def fetch_scanner_history(symbol_str):
     return yf.Ticker(to_yfinance_symbol(symbol_str)).history(
         period="1y", interval="1d"
     )
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_portfolio_quote(symbol):
+    try:
+        info = yf.Ticker(to_yfinance_symbol(symbol)).info
+        beta = info.get("beta", 1.0)
+        price = info.get("currentPrice") or info.get("regularMarketPrice") or 0.0
+        beta = float(beta) if beta is not None and np.isfinite(float(beta)) else 1.0
+        price = float(price) if price is not None and np.isfinite(float(price)) else 0.0
+        return beta, price
+    except Exception:
+        return 1.0, 0.0
 
 
 def find_dual_divergences(history, lookback_days=90, window=3):
@@ -1017,6 +1074,8 @@ def calculate_fcfe_dcf(
     discount_rate,
     exit_multiple,
     total_shares_outstanding,
+    terminal_growth_rate=0.0,
+    terminal_value_eligible=True,
 ):
     revenue = max(float(base_revenue), 0.0)
     growth_rate = max(-0.50, min(float(revenue_growth_rate), 1.00))
@@ -1027,7 +1086,6 @@ def calculate_fcfe_dcf(
     if discount > 1.0:
         discount /= 100.0
     discount = max(0.01, min(discount, 0.50))
-    multiple = max(0.0, float(exit_multiple))
     shares = max(float(total_shares_outstanding), 0.0)
 
     yearly_projections = []
@@ -1046,7 +1104,17 @@ def calculate_fcfe_dcf(
             "Present Value": present_value,
         })
 
-    terminal_value = yearly_projections[-1]["FCFE"] * multiple
+    final_fcfe = yearly_projections[-1]["FCFE"]
+    terminal_growth = max(
+        0.0, min(float(terminal_growth_rate), 0.03, discount - 0.01)
+    )
+    if terminal_value_eligible and final_fcfe > 0 and discount > terminal_growth:
+        sustainable_multiple = (1.0 + terminal_growth) / (discount - terminal_growth)
+        multiple = min(max(0.0, float(exit_multiple)), sustainable_multiple, 25.0)
+        terminal_value = final_fcfe * multiple
+    else:
+        multiple = 0.0
+        terminal_value = 0.0
     present_value_terminal = terminal_value / ((1.0 + discount) ** years)
     total_present_value = present_value_total + present_value_terminal
     value_per_share = total_present_value / shares if shares > 0 else 0.0
@@ -1066,6 +1134,7 @@ def calculate_fcfe_dcf(
         "totalPresentValue": total_present_value,
         "discountRate": discount,
         "exitMultiple": multiple,
+        "terminalGrowthRate": terminal_growth,
     }
 
 
@@ -1261,6 +1330,114 @@ def calculate_rsi(series, period=14):
     relative_strength = average_gain / average_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + relative_strength))
     return rsi.fillna(100.0).where(average_gain > 0, 0.0)
+
+
+def calculate_advanced_indicators_and_signals(data, period=14, window=3):
+    required = {"High", "Low", "Close", "Volume"}
+    if data.empty or not required.issubset(data.columns):
+        return data.copy(), []
+
+    result = data.copy()
+    hl_range = result["High"] - result["Low"]
+    safe_range = np.where(hl_range == 0, 1e-9, hl_range)
+    clv = np.where(
+        hl_range == 0,
+        0.0,
+        (
+            (result["Close"] - result["Low"])
+            - (result["High"] - result["Close"])
+        )
+        / safe_range,
+    )
+    result["Delta"] = result["Volume"] * clv
+    result["CPD"] = result["Delta"].cumsum()
+
+    typical_price = (result["High"] + result["Low"] + result["Close"]) / 3.0
+    raw_money_flow = typical_price * result["Volume"]
+    price_change = typical_price.diff()
+    positive_flow = raw_money_flow.where(price_change > 0, 0.0)
+    negative_flow = raw_money_flow.where(price_change < 0, 0.0)
+    positive_sum = positive_flow.rolling(period, min_periods=period).sum()
+    negative_sum = negative_flow.rolling(period, min_periods=period).sum()
+    money_ratio = positive_sum / negative_sum.replace(0, np.nan)
+    result[f"MFI{period}"] = (100.0 - (100.0 / (1.0 + money_ratio))).where(
+        negative_sum > 0, 100.0
+    )
+    result.loc[(positive_sum == 0) & (negative_sum == 0), f"MFI{period}"] = 50.0
+    result = calculate_synchronized_macd(result)
+    histogram = result["MACD_Hist"]
+    result["Signal_Hist_Exit"] = (
+        (histogram > 0)
+        & (histogram < histogram.shift(1))
+        & (histogram.shift(1) > histogram.shift(2))
+    )
+
+    recent_start = max(0, len(result) - 30)
+    recent = result.iloc[recent_start:]
+    divergences = []
+    if len(recent) >= (window * 2 + 3):
+        low_pivots = []
+        high_pivots = []
+        lows = recent["Low"].to_numpy(dtype=float)
+        highs = recent["High"].to_numpy(dtype=float)
+        for pivot_index in range(window, len(recent) - window):
+            if np.isfinite(lows[pivot_index]) and all(
+                lows[pivot_index] <= lows[pivot_index + offset]
+                and lows[pivot_index] <= lows[pivot_index - offset]
+                for offset in range(1, window + 1)
+            ):
+                low_pivots.append(pivot_index)
+            if np.isfinite(highs[pivot_index]) and all(
+                highs[pivot_index] >= highs[pivot_index + offset]
+                and highs[pivot_index] >= highs[pivot_index - offset]
+                for offset in range(1, window + 1)
+            ):
+                high_pivots.append(pivot_index)
+
+        for indicator in ("CPD", f"MFI{period}"):
+            indicator_values = recent[indicator].to_numpy(dtype=float)
+            for pivots, bullish in ((low_pivots, True), (high_pivots, False)):
+                valid_pivots = [
+                    pivot
+                    for pivot in pivots
+                    if np.isfinite(indicator_values[pivot])
+                ]
+                if len(valid_pivots) < 2:
+                    continue
+                first, second = valid_pivots[-2:]
+                first_price = lows[first] if bullish else highs[first]
+                second_price = lows[second] if bullish else highs[second]
+                first_indicator = indicator_values[first]
+                second_indicator = indicator_values[second]
+                is_divergence = (
+                    second_price < first_price and second_indicator > first_indicator
+                    if bullish
+                    else second_price > first_price
+                    and second_indicator < first_indicator
+                )
+                if is_divergence:
+                    absolute_second = recent_start + second
+                    divergences.append({
+                        "indicator": indicator,
+                        "type": "Bullish" if bullish else "Bearish",
+                        "first_date": result.index[recent_start + first],
+                        "first_price": float(first_price),
+                        "first_indicator_value": float(first_indicator),
+                        "date": result.index[absolute_second],
+                        "price": float(second_price),
+                        "indicator_value": float(second_indicator),
+                        "delta_at_trigger": float(
+                            result["Delta"].iloc[absolute_second]
+                        ),
+                        "cpd_at_trigger": float(
+                            result["CPD"].iloc[absolute_second]
+                        ),
+                        "mfi_at_trigger": float(
+                            result[f"MFI{period}"].iloc[absolute_second]
+                        ),
+                    })
+
+    return result, divergences
 
 
 def summarize_bollinger_state(df):
@@ -1767,6 +1944,318 @@ if app_view == "Scanner Dashboard":
             on_change=open_scanner_signal,
         )
 
+if app_view == "💼 Portfolio & Secondary Allocator":
+    st.title("💼 Portfolio & Secondary Allocator")
+    categories = [
+        "Defensive Core",
+        "High-Beta Satellite",
+        "Cyclical",
+        "Other",
+    ]
+    target_tickers = [
+        "TSM",
+        "AVGO",
+        "ARM",
+        "CIEN",
+        "CLS",
+        "APLD",
+        "NBIS",
+        "BE",
+        "RKLB",
+        "ONDS",
+    ]
+    holding_columns = [
+        "Ticker",
+        "Category",
+        "Beta",
+        "Last Price ($)",
+        "Position Value ($)",
+    ]
+    if "portfolio_holdings" not in st.session_state:
+        st.session_state.portfolio_holdings = pd.DataFrame({
+            "Ticker": pd.Series(dtype=object),
+            "Category": pd.Series(dtype=object),
+            "Beta": pd.Series(dtype=float),
+            "Last Price ($)": pd.Series(dtype=float),
+            "Position Value ($)": pd.Series(dtype=float),
+        })
+
+    capital_col, cash_col = st.columns(2)
+    with capital_col:
+        total_capital = st.number_input(
+            "Total Capital ($USD)",
+            min_value=0.0,
+            value=100_000.0,
+            step=1_000.0,
+            key="portfolio_total_capital",
+        )
+    with cash_col:
+        cash_balance = st.number_input(
+            "Current Cash Balance / Reserve ($USD)",
+            min_value=0.0,
+            value=100_000.0,
+            step=1_000.0,
+            key="portfolio_cash_balance",
+        )
+
+    add_col, custom_col, button_col = st.columns([1, 1, 0.7])
+    with add_col:
+        selected_ticker = st.selectbox(
+            "Target ticker",
+            target_tickers,
+            key="portfolio_target_ticker",
+        )
+    with custom_col:
+        custom_ticker = st.text_input(
+            "Or enter any ticker",
+            key="portfolio_custom_ticker",
+            placeholder="e.g. NVDA",
+        )
+    with button_col:
+        st.write("")
+        add_holding = st.button(
+            "Add holding",
+            use_container_width=True,
+            key="portfolio_add_holding",
+        )
+
+    if add_holding:
+        ticker_to_add = (custom_ticker.strip() or selected_ticker).upper()
+        holdings = st.session_state.portfolio_holdings.copy()
+        existing_tickers = (
+            holdings["Ticker"].astype(str).str.upper().tolist()
+            if not holdings.empty
+            else []
+        )
+        if ticker_to_add not in existing_tickers:
+            beta, last_price = fetch_portfolio_quote(ticker_to_add)
+            new_holding = pd.DataFrame([{
+                "Ticker": ticker_to_add,
+                "Category": "High-Beta Satellite",
+                "Beta": beta,
+                "Last Price ($)": last_price,
+                "Position Value ($)": 0.0,
+            }])
+            st.session_state.portfolio_holdings = pd.concat(
+                [holdings, new_holding], ignore_index=True
+            )
+            st.rerun()
+        st.info(f"{ticker_to_add} is already in the holdings table.")
+
+    base_holdings = st.session_state.portfolio_holdings.copy()
+    edited_holdings = st.data_editor(
+        base_holdings,
+        key="portfolio_holdings_editor",
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Ticker": st.column_config.TextColumn("Ticker", required=True),
+            "Category": st.column_config.SelectboxColumn(
+                "Category", options=categories, required=True
+            ),
+            "Beta": st.column_config.NumberColumn(
+                "Beta", min_value=-5.0, max_value=10.0, step=0.05, format="%.2f"
+            ),
+            "Last Price ($)": st.column_config.NumberColumn(
+                "Last Price ($)", format="$%.2f", disabled=True
+            ),
+            "Position Value ($)": st.column_config.NumberColumn(
+                "Position Value ($)", min_value=0.0, step=100.0, format="$%.2f"
+            ),
+        },
+    )
+    edited_holdings = edited_holdings.reindex(columns=holding_columns).copy()
+    for row_position in range(len(edited_holdings)):
+        raw_ticker = edited_holdings.iloc[row_position]["Ticker"]
+        ticker_value = "" if pd.isna(raw_ticker) else str(raw_ticker)
+        ticker_value = ticker_value.strip().upper()
+        edited_holdings.iat[row_position, 0] = ticker_value
+        if not ticker_value:
+            continue
+        old_ticker = (
+            str(base_holdings.iloc[row_position]["Ticker"]).strip().upper()
+            if row_position < len(base_holdings)
+            else ""
+        )
+        beta_value = pd.to_numeric(
+            pd.Series([edited_holdings.iloc[row_position]["Beta"]]),
+            errors="coerce",
+        ).iloc[0]
+        price_value = pd.to_numeric(
+            pd.Series([edited_holdings.iloc[row_position]["Last Price ($)"]]),
+            errors="coerce",
+        ).iloc[0]
+        if ticker_value != old_ticker or pd.isna(beta_value) or pd.isna(price_value):
+            beta_value, price_value = fetch_portfolio_quote(ticker_value)
+            edited_holdings.iat[row_position, 2] = beta_value
+            edited_holdings.iat[row_position, 3] = price_value
+        category_value = edited_holdings.iloc[row_position]["Category"]
+        if pd.isna(category_value) or category_value not in categories:
+            edited_holdings.iat[row_position, 1] = "Other"
+    edited_holdings["Beta"] = pd.to_numeric(
+        edited_holdings["Beta"], errors="coerce"
+    ).fillna(1.0)
+    edited_holdings["Last Price ($)"] = pd.to_numeric(
+        edited_holdings["Last Price ($)"], errors="coerce"
+    ).fillna(0.0)
+    edited_holdings["Position Value ($)"] = pd.to_numeric(
+        edited_holdings["Position Value ($)"], errors="coerce"
+    ).fillna(0.0).clip(lower=0.0)
+    st.session_state.portfolio_holdings = edited_holdings.reset_index(drop=True)
+
+    positions_total = float(edited_holdings["Position Value ($)"].sum())
+    allocated_value = positions_total + float(cash_balance)
+    portfolio_beta = (
+        float(
+            (
+                edited_holdings["Position Value ($)"]
+                * edited_holdings["Beta"]
+            ).sum()
+            / allocated_value
+        )
+        if allocated_value > 0
+        else 0.0
+    )
+    cash_pct = cash_balance / total_capital * 100 if total_capital > 0 else 0.0
+    equity_pct = positions_total / total_capital * 100 if total_capital > 0 else 0.0
+    unallocated_capital = total_capital - allocated_value
+
+    portfolio_metric_cols = st.columns(4)
+    portfolio_metric_cols[0].metric("Cash Reserve", f"{cash_pct:.1f}%")
+    portfolio_metric_cols[1].metric("Equity", f"{equity_pct:.1f}%")
+    portfolio_metric_cols[2].metric("Weighted Portfolio Beta", f"{portfolio_beta:.2f}")
+    portfolio_metric_cols[3].metric(
+        "Unallocated Capital", f"${unallocated_capital:,.0f}"
+    )
+
+    core_value = float(
+        edited_holdings.loc[
+            edited_holdings["Category"] == "Defensive Core", "Position Value ($)"
+        ].sum()
+    )
+    satellite_value = float(
+        edited_holdings.loc[
+            edited_holdings["Category"] == "High-Beta Satellite",
+            "Position Value ($)",
+        ].sum()
+    )
+    core_pct = core_value / positions_total * 100 if positions_total > 0 else 0.0
+    satellite_pct = (
+        satellite_value / positions_total * 100 if positions_total > 0 else 0.0
+    )
+    core_col, satellite_col = st.columns(2)
+    core_col.metric("Defensive Core / Equity", f"{core_pct:.1f}%", "Target 60-70%")
+    satellite_col.metric(
+        "High-Beta Satellites / Equity", f"{satellite_pct:.1f}%", "Target 30-40%"
+    )
+    if positions_total > 0 and not 60.0 <= core_pct <= 70.0:
+        core_col.warning("Defensive Core is outside its 60-70% target range.")
+    if positions_total > 0 and not 30.0 <= satellite_pct <= 40.0:
+        satellite_col.warning("High-Beta Satellites are outside their 30-40% target range.")
+
+    allocation_values = {"Cash": float(cash_balance)}
+    for category in categories:
+        allocation_values[category] = float(
+            edited_holdings.loc[
+                edited_holdings["Category"] == category, "Position Value ($)"
+            ].sum()
+        )
+    allocation_values = {
+        name: value for name, value in allocation_values.items() if value > 0
+    }
+    if allocation_values:
+        allocation_fig = go.Figure(
+            go.Pie(
+                labels=list(allocation_values),
+                values=list(allocation_values.values()),
+                hole=0.58,
+                sort=False,
+                marker={
+                    "colors": [
+                        "#B7C7D3",
+                        "#2A9D8F",
+                        "#E76F51",
+                        "#E9C46A",
+                        "#7A8C99",
+                    ]
+                },
+                textinfo="label+percent",
+            )
+        )
+        allocation_fig.update_layout(
+            title="Current Portfolio Allocation",
+            height=390,
+            margin=dict(t=55, b=15, l=15, r=15),
+            showlegend=True,
+        )
+        st.plotly_chart(allocation_fig, use_container_width=True)
+
+    st.subheader("Secondary Add Simulation")
+    simulation_col, simulation_ticker_col = st.columns(2)
+    with simulation_col:
+        simulation_amount = st.number_input(
+            "Deploy from cash ($)",
+            min_value=0.0,
+            max_value=float(cash_balance),
+            value=0.0,
+            step=500.0,
+            key="portfolio_simulation_amount",
+        )
+    ticker_options = sorted(
+        {
+            ticker
+            for ticker in target_tickers + edited_holdings["Ticker"].astype(str).tolist()
+            if ticker.strip()
+        }
+    )
+    with simulation_ticker_col:
+        simulation_ticker = st.selectbox(
+            "Simulation ticker",
+            ticker_options,
+            key="portfolio_simulation_ticker",
+        )
+        custom_simulation_ticker = st.text_input(
+            "Or enter simulation ticker",
+            key="portfolio_custom_simulation_ticker",
+            placeholder="e.g. NVDA",
+        )
+    simulation_ticker = (
+        custom_simulation_ticker.strip().upper() or simulation_ticker
+    )
+    existing_simulation_row = edited_holdings[
+        edited_holdings["Ticker"] == simulation_ticker
+    ]
+    if not existing_simulation_row.empty:
+        simulation_beta = float(existing_simulation_row.iloc[0]["Beta"])
+    else:
+        simulation_beta, _ = fetch_portfolio_quote(simulation_ticker)
+
+    simulated_cash = max(float(cash_balance) - simulation_amount, 0.0)
+    simulated_equity = positions_total + float(simulation_amount)
+    simulated_nav = simulated_cash + simulated_equity
+    simulated_beta_numerator = float(
+        (edited_holdings["Position Value ($)"] * edited_holdings["Beta"]).sum()
+    ) + float(simulation_amount) * simulation_beta
+    simulated_beta = (
+        simulated_beta_numerator / simulated_nav if simulated_nav > 0 else 0.0
+    )
+    simulated_cash_pct = (
+        simulated_cash / total_capital * 100 if total_capital > 0 else 0.0
+    )
+    simulated_equity_pct = (
+        simulated_equity / total_capital * 100 if total_capital > 0 else 0.0
+    )
+    simulation_metrics = st.columns(3)
+    simulation_metrics[0].metric(
+        "Simulated Cash Reserve", f"{simulated_cash_pct:.1f}%"
+    )
+    simulation_metrics[1].metric("Simulated Equity", f"{simulated_equity_pct:.1f}%")
+    simulation_metrics[2].metric(
+        "Simulated Weighted Beta", f"{simulated_beta:.2f}",
+        delta=f"{simulated_beta - portfolio_beta:+.2f} vs. current",
+    )
+
 if symbol and app_view == "Stock Analysis":
     try:
         info, df_hist, bs, fin, cf_df, q_fin, q_bs, q_cf = fetch_ticker_data(symbol)
@@ -1847,6 +2336,7 @@ if symbol and app_view == "Stock Analysis":
             rsi_value = np.nan
             rsi_div_type = "Neutral"
             rsi_divergences = []
+            advanced_divergences = []
             bollinger_state = {
                 "squeeze": False,
                 "tag": "Neutral",
@@ -2121,7 +2611,63 @@ if symbol and app_view == "Stock Analysis":
                         fcf_history.append(float(val))
                         fcf_dates.append(str(col)[:10])
 
-            shares_out = info.get("sharesOutstanding", 0)
+            mkt_cap_val = float(info.get("marketCap", 0) or 0.0)
+
+            def normalize_absolute_dollars(value, reference_market_cap):
+                if value is None or pd.isna(value):
+                    return 0.0
+                amount = float(value)
+                if reference_market_cap >= 1_000_000_000 and 0 < abs(amount) < 1:
+                    return amount * 1_000_000_000.0
+                if reference_market_cap >= 1_000_000_000 and 0 < abs(amount) < 1_000_000:
+                    return amount * 1_000_000.0
+                if (
+                    reference_market_cap >= 1_000_000_000
+                    and abs(amount) >= 1_000_000
+                    and abs(amount) / reference_market_cap < 1e-9
+                ):
+                    scaled_amount = amount * 1_000.0
+                    if abs(scaled_amount) <= reference_market_cap * 3.0:
+                        return scaled_amount
+                return amount
+
+            def normalize_shares_outstanding(value, market_cap, share_price):
+                try:
+                    shares = float(value or 0.0)
+                    expected_shares = float(market_cap) / float(share_price)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    return 0.0
+                if (
+                    not np.isfinite(shares)
+                    or not np.isfinite(expected_shares)
+                    or shares <= 0
+                    or expected_shares <= 0
+                ):
+                    return max(shares, 0.0) if np.isfinite(shares) else 0.0
+                raw_error = abs(np.log(shares / expected_shares))
+                candidates = [
+                    shares * 1_000.0,
+                    shares / 1_000.0,
+                    shares * 1_000_000.0,
+                    shares / 1_000_000.0,
+                    shares * 1_000_000_000.0,
+                    shares / 1_000_000_000.0,
+                ]
+                best_candidate = min(
+                    candidates,
+                    key=lambda candidate: abs(np.log(candidate / expected_shares)),
+                )
+                adjusted_error = abs(np.log(best_candidate / expected_shares))
+                if (
+                    raw_error >= np.log(1_000.0) - 1e-9
+                    and adjusted_error < np.log(10.0)
+                ):
+                    return best_candidate
+                return shares
+
+            shares_out = normalize_shares_outstanding(
+                info.get("sharesOutstanding", 0), mkt_cap_val, curr_price
+            )
 
             net_debt = 0.0
             total_debt = 0.0
@@ -2156,10 +2702,12 @@ if symbol and app_view == "Stock Analysis":
                 except Exception:
                     pass
 
+            total_debt = normalize_absolute_dollars(total_debt, mkt_cap_val)
+            cash_val = normalize_absolute_dollars(cash_val, mkt_cap_val)
+            net_debt = total_debt - cash_val
+
             erp = 0.050
             cost_of_equity = rf_rate + (beta * erp)
-            mkt_cap_val = info.get("marketCap", 0) or 0.0
-
             debt_spread = 0.020
             if mkt_cap_val > 0 and total_debt > 0:
                 cost_of_debt = rf_rate + debt_spread
@@ -2178,25 +2726,12 @@ if symbol and app_view == "Stock Analysis":
                     f" {rf_rate*100:.2f}%)"
                 )
 
-            def normalize_absolute_dollars(value, reference_market_cap):
-                if value is None or pd.isna(value):
-                    return 0.0
-                amount = float(value)
-                if reference_market_cap >= 1_000_000_000 and 0 < abs(amount) < 1_000_000:
-                    return amount * 1_000_000.0
-                return amount
-
-            mkt_cap_val = float(info.get("marketCap", 0) or 0.0)
             fcf_history = [
                 normalize_absolute_dollars(value, mkt_cap_val)
                 for value in fcf_history
             ]
             ttm_fcf = normalize_absolute_dollars(ttm_fcf, mkt_cap_val)
-            total_debt = normalize_absolute_dollars(total_debt, mkt_cap_val)
-            cash_val = normalize_absolute_dollars(cash_val, mkt_cap_val)
-            net_debt = total_debt - cash_val
 
-            valid_fcfs = [f for f in fcf_history if f > 0]
             dated_fcf = (
                 sorted(zip(fcf_dates, fcf_history), key=lambda item: item[0])
                 if fcf_dates
@@ -2205,21 +2740,16 @@ if symbol and app_view == "Stock Analysis":
             chronological_fcf = [
                 float(value) for _, value in dated_fcf if pd.notna(value)
             ]
-            latest_annual_fcf = (
-                chronological_fcf[-1]
-                if chronological_fcf and chronological_fcf[-1] > 0
-                else None
-            )
-            historical_fcf_average = (
-                float(np.mean([value for value in chronological_fcf[-3:] if value > 0]))
-                if chronological_fcf
+            latest_annual_fcf = chronological_fcf[-1] if chronological_fcf else 0.0
+            recent_positive_annual_fcfs = [
+                value for value in chronological_fcf[-3:] if value > 0
+            ]
+            historical_fcf_median = (
+                float(np.median(recent_positive_annual_fcfs))
+                if recent_positive_annual_fcfs
                 else 0.0
             )
-            latest_fcf = latest_annual_fcf or (
-                ttm_fcf
-                if ttm_fcf > 0
-                else (valid_fcfs[-1] if valid_fcfs else 0.0)
-            )
+            latest_fcf = ttm_fcf if ttm_fcf != 0 else latest_annual_fcf
 
             latest_net_income = 0.0
             if not fin.empty:
@@ -2236,13 +2766,34 @@ if symbol and app_view == "Stock Analysis":
                             )
                             break
 
-            smoothed_fcf = historical_fcf_average
-            if latest_net_income > 0:
-                smoothed_fcf = max(smoothed_fcf, latest_net_income * 0.80)
-            if latest_fcf > 0 and smoothed_fcf > 0 and latest_fcf < smoothed_fcf * 0.50:
-                base_fcf = smoothed_fcf
+            net_income_fcf_proxy = (
+                latest_net_income * 0.80 if latest_net_income > 0 else 0.0
+            )
+            if latest_fcf > 0:
+                if historical_fcf_median > 0 and not (
+                    historical_fcf_median * 0.50
+                    <= latest_fcf
+                    <= historical_fcf_median * 2.00
+                ):
+                    base_fcf = historical_fcf_median or net_income_fcf_proxy
+                elif net_income_fcf_proxy > 0 and not historical_fcf_median and not (
+                    net_income_fcf_proxy * 0.25
+                    <= latest_fcf
+                    <= net_income_fcf_proxy * 4.00
+                ):
+                    base_fcf = net_income_fcf_proxy
+                else:
+                    base_fcf = latest_fcf
             else:
-                base_fcf = latest_fcf or smoothed_fcf
+                base_fcf = historical_fcf_median or net_income_fcf_proxy
+
+            recent_annual_fcfs = chronological_fcf[-3:]
+            stable_positive_fcf = bool(
+                len(recent_annual_fcfs) >= 2
+                and sum(value > 0 for value in recent_annual_fcfs) >= 2
+                and latest_annual_fcf > 0
+                and base_fcf > 0
+            )
 
             if base_fcf > 0 and shares_out > 0:
                 industry_growth = get_industry_growth_profile(
@@ -2389,19 +2940,32 @@ if symbol and app_view == "Stock Analysis":
                     ps_implied_value *= market_multiple_factor
 
                 if lifecycle == "Star":
-                    valuation_weights = {"dcf": 0.55, "pe": 0.20, "ps": 0.25}
+                    valuation_weights = {"dcf": 0.80, "pe": 0.10, "ps": 0.10}
                 elif lifecycle == "Cash Cow":
-                    valuation_weights = {"dcf": 0.55, "pe": 0.30, "ps": 0.15}
+                    valuation_weights = {"dcf": 0.80, "pe": 0.15, "ps": 0.05}
                 elif lifecycle == "Question Mark":
-                    valuation_weights = {"dcf": 0.50, "pe": 0.15, "ps": 0.35}
+                    valuation_weights = {"dcf": 0.80, "pe": 0.05, "ps": 0.15}
                 else:
-                    valuation_weights = {"dcf": 0.50, "pe": 0.35, "ps": 0.15}
+                    valuation_weights = {"dcf": 0.80, "pe": 0.15, "ps": 0.05}
 
                 def blend_valuation(dcf_value):
+                    dcf_value = max(float(dcf_value), 0.0)
+                    if dcf_value <= 0:
+                        return 0.0
+                    peer_floor = dcf_value * 0.50
+                    peer_ceiling = dcf_value * 1.50
                     values = {
                         "dcf": dcf_value,
-                        "pe": pe_implied_value,
-                        "ps": ps_implied_value,
+                        "pe": (
+                            max(peer_floor, min(pe_implied_value, peer_ceiling))
+                            if pe_implied_value is not None
+                            else None
+                        ),
+                        "ps": (
+                            max(peer_floor, min(ps_implied_value, peer_ceiling))
+                            if ps_implied_value is not None
+                            else None
+                        ),
                     }
                     available = {
                         key: value
@@ -2429,10 +2993,27 @@ if symbol and app_view == "Stock Analysis":
                 cash_flow_conversion_rate = max(
                     0.50, min(cash_flow_conversion_rate, 1.50)
                 )
-                exit_multiple = max(
-                    8.0, min(float(ind_benchmarks["PE"]) * market_multiple_factor, 45.0)
-                )
+                if stable_positive_fcf:
+                    benchmark_exit_multiple = (
+                        float(ind_benchmarks["PE"]) * market_multiple_factor
+                    )
+                    exit_multiple = (
+                        max(8.0, min(benchmark_exit_multiple, 20.0))
+                        if latest_net_income > 0
+                        else 10.0
+                    )
+                else:
+                    exit_multiple = 0.0
                 forecast_period = 10
+
+                terminal_growth_cap = max(0.0, min(0.03, discount_rate - 0.01))
+                base_term_g = (
+                    min(max(float(terminal_g), 0.0), terminal_growth_cap)
+                    if stable_positive_fcf
+                    else 0.0
+                )
+                pess_term_g = max(0.0, base_term_g - 0.005)
+                opt_term_g = min(terminal_growth_cap, base_term_g + 0.005)
 
                 base_growth_rate = growth_est
                 pess_growth_rate = max(growth_floor, growth_est - 0.05)
@@ -2447,6 +3028,8 @@ if symbol and app_view == "Stock Analysis":
                     discount_rate,
                     exit_multiple,
                     shares_out,
+                    base_term_g,
+                    stable_positive_fcf,
                 )
                 pess_fcfe_result = calculate_fcfe_dcf(
                     curr_price,
@@ -2458,6 +3041,8 @@ if symbol and app_view == "Stock Analysis":
                     discount_rate + 0.01,
                     exit_multiple * 0.90,
                     shares_out,
+                    pess_term_g,
+                    stable_positive_fcf,
                 )
                 opt_fcfe_result = calculate_fcfe_dcf(
                     curr_price,
@@ -2469,12 +3054,13 @@ if symbol and app_view == "Stock Analysis":
                     max(discount_rate - 0.008, 0.05),
                     exit_multiple * 1.10,
                     shares_out,
+                    opt_term_g,
+                    stable_positive_fcf,
                 )
 
                 base_schedule = [base_growth_rate] * 5
                 pess_schedule = [pess_growth_rate] * 5
                 opt_schedule = [opt_growth_rate] * 5
-                base_term_g = pess_term_g = opt_term_g = 0.0
                 base_dcf_val = base_fcfe_result["dcfValuePerShare"]
                 pess_dcf_val = pess_fcfe_result["dcfValuePerShare"]
                 opt_dcf_val = opt_fcfe_result["dcfValuePerShare"]
@@ -2590,7 +3176,12 @@ if symbol and app_view == "Stock Analysis":
                     "Blended Growth Anchor (%)": round(growth_est * 100, 2),
                     "Starting FCF Base ($)": round(base_fcf, 2),
                     "Discount Rate Used (r)": round(discount_rate, 6),
-                    "Enterprise Value ($)": round(base_ev, 2),
+                    "Terminal FCF Eligible": stable_positive_fcf,
+                    "Terminal Growth Rate Used": round(base_term_g, 4),
+                    "Terminal Exit Multiple Used": round(
+                        base_fcfe_result["exitMultiple"], 2
+                    ),
+                    "DCF Equity Value ($)": round(base_eq, 2),
                     "Total Debt ($)": round(total_debt, 2),
                     "Shares Outstanding": round(float(shares_out), 2),
                 })
@@ -2960,7 +3551,36 @@ if symbol and app_view == "Stock Analysis":
                             ma250_valid = False
                             ma250_val = 0.0
 
-                        df_hist = calculate_synchronized_macd(df_hist)
+                        df_hist, advanced_divergences = (
+                            calculate_advanced_indicators_and_signals(df_hist)
+                        )
+
+                        bullish_advanced = [
+                            signal
+                            for signal in advanced_divergences
+                            if signal["type"] == "Bullish"
+                        ]
+                        bearish_advanced = [
+                            signal
+                            for signal in advanced_divergences
+                            if signal["type"] == "Bearish"
+                        ]
+                        if bullish_advanced:
+                            indicators = ", ".join(
+                                sorted({signal["indicator"] for signal in bullish_advanced})
+                            )
+                            st.success(
+                                f"🟢 CPD / MFI Bullish Divergence Detected ({indicators})!"
+                                " Institutional accumulation suspected at lows."
+                            )
+                        if bearish_advanced:
+                            indicators = ", ".join(
+                                sorted({signal["indicator"] for signal in bearish_advanced})
+                            )
+                            st.warning(
+                                f"🔴 CPD / MFI Bearish Divergence Detected ({indicators})!"
+                                " Hidden distribution/selling pressure at highs."
+                            )
 
                         trend_status, trend_desc = classify_trend_status(df_hist)
 
@@ -3038,11 +3658,20 @@ if symbol and app_view == "Stock Analysis":
                             if all_divergences:
                                 div_df = pd.DataFrame(all_divergences)[
                                     ["date", "type", "price", "macd"]
-                                ]
-                                div_df["date"] = pd.to_datetime(
-                                    div_df["date"]
+                                ].rename(columns={
+                                    "date": "Trigger Date",
+                                    "type": "Signal",
+                                    "price": "Trigger Price ($)",
+                                    "macd": "MACD at Trigger",
+                                })
+                                div_df["Trigger Date"] = pd.to_datetime(
+                                    div_df["Trigger Date"]
                                 ).dt.strftime("%Y-%m-%d")
-                                st.dataframe(div_df, use_container_width=True)
+                                st.dataframe(
+                                    div_df,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
                             else:
                                 st.info("近 2 年區間內未偵測到顯著 MACD 背離點位。")
 
@@ -3050,9 +3679,14 @@ if symbol and app_view == "Stock Analysis":
                             if rsi_divergences:
                                 rsi_df = pd.DataFrame(rsi_divergences)[
                                     ["date", "type", "price", "indicator"]
-                                ].rename(columns={"indicator": "RSI"})
-                                rsi_df["date"] = pd.to_datetime(
-                                    rsi_df["date"]
+                                ].rename(columns={
+                                    "date": "Trigger Date",
+                                    "type": "Signal",
+                                    "price": "Trigger Price ($)",
+                                    "indicator": "RSI at Trigger",
+                                })
+                                rsi_df["Trigger Date"] = pd.to_datetime(
+                                    rsi_df["Trigger Date"]
                                 ).dt.strftime("%Y-%m-%d")
                                 st.dataframe(
                                     rsi_df,
@@ -3061,6 +3695,44 @@ if symbol and app_view == "Stock Analysis":
                                 )
                             else:
                                 st.info("近 2 年區間內未偵測到顯著 RSI 背離。")
+
+                        st.subheader("📊 CPD / MFI / Order Flow Delta Divergence Triggers")
+                        if advanced_divergences:
+                            advanced_divergence_df = pd.DataFrame([
+                                {
+                                    "Indicator": signal["indicator"],
+                                    "Signal": signal["type"],
+                                    "Trigger Date": pd.Timestamp(
+                                        signal["date"]
+                                    ).strftime("%Y-%m-%d"),
+                                    "Trigger Price ($)": signal["price"],
+                                    "Delta at Trigger": signal[
+                                        "delta_at_trigger"
+                                    ],
+                                    "CPD at Trigger": signal[
+                                        "cpd_at_trigger"
+                                    ],
+                                    "MFI (14) at Trigger": signal[
+                                        "mfi_at_trigger"
+                                    ],
+                                }
+                                for signal in advanced_divergences
+                            ])
+                            st.dataframe(
+                                advanced_divergence_df.style.format({
+                                    "Trigger Price ($)": "${:.2f}",
+                                    "Delta at Trigger": "{:,.0f}",
+                                    "CPD at Trigger": "{:,.0f}",
+                                    "MFI (14) at Trigger": "{:.1f}",
+                                }),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        else:
+                            st.info(
+                                "No CPD or MFI divergence trigger was detected in"
+                                " the latest 30 bars."
+                            )
 
                         # ==========================================
                         # 6. 關鍵支撐/壓力位與黃金分割
@@ -3151,21 +3823,25 @@ if symbol and app_view == "Stock Analysis":
             # ==========================================
             st.write("---")
             st.subheader(
-                "📈 9. Python 動態圖表 (含 Fibonacci / Standard MA / MACD / RSI /"
-                " Bollinger 背離標記)"
+                "📈 9. Price / MFI / Order Flow Delta / CPD Chart"
             )
 
-            if not df_hist.empty and len(df_hist) >= 20:
+            if (
+                not df_hist.empty
+                and len(df_hist) >= 20
+                and {"MFI14", "Delta", "CPD"}.issubset(df_hist.columns)
+            ):
                 fig_k = make_subplots(
-                    rows=3,
+                    rows=4,
                     cols=1,
                     shared_xaxes=True,
                     vertical_spacing=0.025,
-                    row_heights=[0.58, 0.22, 0.20],
+                    row_heights=[0.50, 0.15, 0.15, 0.20],
                     subplot_titles=(
-                        "Price / EMA20 / EMA50",
-                        "RSI (14)",
-                        "MACD (8,17,9)",
+                        "Price / Signal Turns / Divergences",
+                        "MFI (14)",
+                        "Order Flow Delta",
+                        "CPD (Cumulative Volume Delta)",
                     ),
                 )
                 fig_k.add_trace(
@@ -3300,6 +3976,68 @@ if symbol and app_view == "Stock Analysis":
                     col=1,
                 )
 
+                entry_mask = df_hist["Signal_Hist_Turn"].fillna(False).astype(bool)
+                exit_mask = df_hist["Signal_Hist_Exit"].fillna(False).astype(bool)
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index[entry_mask],
+                        y=df_hist.loc[entry_mask, "Close"],
+                        mode="markers",
+                        name="Signal_Hist_Turn Entry",
+                        marker=dict(color="#2A9D8F", symbol="triangle-up", size=11),
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index[exit_mask],
+                        y=df_hist.loc[exit_mask, "Close"],
+                        mode="markers",
+                        name="Histogram Exit",
+                        marker=dict(color="#E76F51", symbol="triangle-down", size=11),
+                    ),
+                    row=1,
+                    col=1,
+                )
+
+                for divergence in advanced_divergences:
+                    divergence_color = (
+                        "#2A9D8F" if divergence["type"] == "Bullish" else "#E76F51"
+                    )
+                    fig_k.add_trace(
+                        go.Scatter(
+                            x=[divergence["first_date"], divergence["date"]],
+                            y=[divergence["first_price"], divergence["price"]],
+                            mode="lines+markers",
+                            name=(
+                                f"{divergence['indicator']} "
+                                f"{divergence['type']} Divergence"
+                            ),
+                            line=dict(color=divergence_color, width=2),
+                            marker=dict(size=9, symbol="diamond"),
+                        ),
+                        row=1,
+                        col=1,
+                    )
+                    indicator_row = 4 if divergence["indicator"] == "CPD" else 2
+                    fig_k.add_trace(
+                        go.Scatter(
+                            x=[divergence["first_date"], divergence["date"]],
+                            y=[
+                                divergence["first_indicator_value"],
+                                divergence["indicator_value"],
+                            ],
+                            mode="lines+markers",
+                            name=f"{divergence['indicator']} divergence pivots",
+                            line=dict(color=divergence_color, width=2),
+                            marker=dict(size=8, symbol="diamond"),
+                            showlegend=False,
+                        ),
+                        row=indicator_row,
+                        col=1,
+                    )
+
                 for div in all_divergences:
                     color_tag = "green" if "看多" in div["type"] else "red"
                     fig_k.add_annotation(
@@ -3318,83 +4056,52 @@ if symbol and app_view == "Stock Analysis":
                 fig_k.add_trace(
                     go.Scatter(
                         x=df_hist.index,
-                        y=df_hist["RSI14"],
-                        name="RSI (14)",
+                        y=df_hist["MFI14"],
+                        name="MFI (14)",
                         line=dict(color="#00BFA5", width=2),
                     ),
                     row=2,
                     col=1,
                 )
                 fig_k.add_hline(
-                    y=70,
+                    y=80,
                     line_dash="dash",
                     line_color="#EF5350",
-                    annotation_text="Overbought 70",
+                    annotation_text="Overbought 80",
                     row=2,
                     col=1,
                 )
                 fig_k.add_hline(
-                    y=30,
+                    y=20,
                     line_dash="dash",
                     line_color="#42A5F5",
-                    annotation_text="Oversold 30",
+                    annotation_text="Oversold 20",
                     row=2,
                     col=1,
                 )
-                for div in rsi_divergences:
-                    color_tag = "green" if "看多" in div["type"] else "red"
-                    fig_k.add_annotation(
-                        x=div["date"],
-                        y=div["indicator"],
-                        text=" RSI Bull" if "看多" in div["type"] else " RSI Bear",
-                        showarrow=True,
-                        arrowhead=2,
-                        arrowcolor=color_tag,
-                        ax=0,
-                        ay=-18 if "看多" in div["type"] else 18,
-                        row=2,
-                        col=1,
-                    )
 
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["MACD"],
-                        name="MACD",
-                        line=dict(color="blue"),
-                    ),
-                    row=3,
-                    col=1,
-                )
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["MACD_Signal"],
-                        name="Signal",
-                        line=dict(color="orange"),
-                    ),
-                    row=3,
-                    col=1,
-                )
                 fig_k.add_trace(
                     go.Bar(
                         x=df_hist.index,
-                        y=df_hist["MACD_Hist"],
-                        name="Hist",
-                        marker_color="gray",
+                        name="Order Flow Delta",
+                        y=df_hist["Delta"],
+                        marker_color=np.where(
+                            df_hist["Delta"] >= 0, "#2A9D8F", "#E76F51"
+                        ),
                     ),
                     row=3,
                     col=1,
                 )
-
-                for trigger_date in df_hist.index[df_hist["Signal_Hist_Turn"]]:
-                    fig_k.add_vline(
-                        x=trigger_date,
-                        line_dash="dash",
-                        line_color="#00BFA5",
-                        row=1,
-                        col=1,
-                    )
+                fig_k.add_trace(
+                    go.Scatter(
+                        x=df_hist.index,
+                        y=df_hist["CPD"],
+                        name="CPD",
+                        line=dict(color="#00CFE8", width=2),
+                    ),
+                    row=4,
+                    col=1,
+                )
 
                 scanner_signal = st.session_state.get("selected_scanner_signal")
                 if scanner_signal and scanner_signal.get("Ticker") == symbol:
@@ -3431,44 +4138,15 @@ if symbol and app_view == "Stock Analysis":
                         row=1,
                         col=1,
                     )
-                    fig_k.add_trace(
-                        go.Scatter(
-                            x=pivot_dates,
-                            y=[
-                                scanner_signal["First RSI"],
-                                scanner_signal["Second RSI"],
-                            ],
-                            mode="lines+markers",
-                            name="Dual divergence RSI pivots",
-                            line=dict(color=signal_color, width=2),
-                            marker=dict(size=7),
-                        ),
-                        row=2,
-                        col=1,
-                    )
-                    fig_k.add_trace(
-                        go.Scatter(
-                            x=pivot_dates,
-                            y=[
-                                scanner_signal["First MACD"],
-                                scanner_signal["Second MACD"],
-                            ],
-                            mode="lines+markers",
-                            name="Dual divergence MACD pivots",
-                            line=dict(color=signal_color, width=2),
-                            marker=dict(size=7),
-                        ),
-                        row=3,
-                        col=1,
-                    )
-
                 fig_k.update_yaxes(range=[0, 100], row=2, col=1)
                 fig_k.update_layout(
-                    height=760,
+                    height=900,
                     xaxis_rangeslider_visible=False,
                     margin=dict(t=35, b=20),
                 )
                 st.plotly_chart(fig_k, use_container_width=True)
+            elif not df_hist.empty:
+                st.info("Advanced price-volume indicators are unavailable for this ticker.")
 
             # ==========================================
             # 10. Embedded TradingView Chart
