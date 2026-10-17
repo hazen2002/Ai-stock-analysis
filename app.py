@@ -631,10 +631,8 @@ def fetch_portfolio_quote(symbol):
         return 1.0, 0.0
 
 
-def find_dual_divergences(history, lookback_days=365, window=3):
-    """Compare RSI and MACD at matching price pivots within the lookback window.
-       Updated lookback_days default to 365 so individual Stock Analysis views
-       match and include signals over a full year."""
+def find_dual_divergences(history, lookback_days=90, window=3):
+    """Compare RSI and MACD at matching price pivots within the lookback window."""
     required = {"High", "Low", "Close"}
     if history.empty or not required.issubset(history.columns):
         return []
@@ -1187,6 +1185,75 @@ def classify_trend_status(df):
         )
 
     return status, desc
+
+
+def scan_all_macd_divergences(df, window=5, min_gap_days=10):
+    """獨立掃描 MACD 背離"""
+    if len(df) < 60 or "MACD" not in df.columns:
+        return []
+
+    raw_divergences = []
+    prices = df["Close"].values
+    macds = df["MACD"].values
+    dates = df.index
+    n = len(df)
+
+    piv_lows = []
+    piv_highs = []
+
+    for i in range(window, n - window):
+        if all(prices[i] <= prices[i - j] for j in range(1, window + 1)) and all(
+            prices[i] <= prices[i + j] for j in range(1, window + 1)
+        ):
+            piv_lows.append((i, dates[i], prices[i], macds[i]))
+
+        if all(prices[i] >= prices[i - j] for j in range(1, window + 1)) and all(
+            prices[i] >= prices[i + j] for j in range(1, window + 1)
+        ):
+            piv_highs.append((i, dates[i], prices[i], macds[i]))
+
+    for k in range(1, len(piv_lows)):
+        i2, d2, p2, m2 = piv_lows[k]
+        i1, d1, p1, m1 = piv_lows[k - 1]
+        if (i2 - i1) <= 60:
+            if p2 < p1 and m2 > m1:
+                raw_divergences.append({
+                    "index": i2,
+                    "date": d2,
+                    "type": "看多背離 (Bullish)",
+                    "price": p2,
+                    "macd": m2,
+                })
+
+    for k in range(1, len(piv_highs)):
+        i2, d2, p2, m2 = piv_highs[k]
+        i1, d1, p1, m1 = piv_highs[k - 1]
+        if (i2 - i1) <= 60:
+            if p2 > p1 and m2 < m1:
+                raw_divergences.append({
+                    "index": i2,
+                    "date": d2,
+                    "type": "看空背離 (Bearish)",
+                    "price": p2,
+                    "macd": m2,
+                })
+
+    raw_divergences.sort(key=lambda x: x["index"])
+
+    filtered_divergences = []
+    for div in raw_divergences:
+        if not filtered_divergences:
+            filtered_divergences.append(div)
+        else:
+            last_div = filtered_divergences[-1]
+            if (
+                div["index"] - last_div["index"]
+            ) >= min_gap_days or div["type"] != last_div["type"]:
+                filtered_divergences.append(div)
+            else:
+                filtered_divergences[-1] = div
+
+    return filtered_divergences
 
 
 def scan_indicator_divergences(df, indicator_column, window=5, min_gap_days=10):
@@ -3130,49 +3197,6 @@ if symbol and app_view == "Stock Analysis":
                     delta=f"安全邊際: {margin_of_safety:.1f}%",
                 )
 
-                st.write({
-                    "Classification Stage": lifecycle,
-                    "Company Size Benchmark": company_size,
-                    "AI/Investment Capex Intensity (%)": round(
-                        capex_intensity * 100, 2
-                    ),
-                    "Investment-Heavy Growth Treatment": investment_heavy_growth,
-                    "Net Income Growth > FCF Growth": earnings_outpace_fcf,
-                    "Growth Weights (FCF/NI/Revenue)": (
-                        f"{weights['fcf']:.0%} / {weights['net_income']:.0%} /"
-                        f" {weights['revenue']:.0%}"
-                    ),
-                    "Valuation Weights (DCF/PE/PS)": (
-                        f"{valuation_weights['dcf']:.0%} /"
-                        f" {valuation_weights['pe']:.0%} /"
-                        f" {valuation_weights['ps']:.0%}"
-                    ),
-                    "Market Multiple Premium Factor": round(
-                        market_multiple_factor, 3
-                    ),
-                    "P/E Implied Value ($/share)": (
-                        round(pe_implied_value, 2)
-                        if pe_implied_value is not None
-                        else None
-                    ),
-                    "P/S Implied Value ($/share)": (
-                        round(ps_implied_value, 2)
-                        if ps_implied_value is not None
-                        else None
-                    ),
-                    "Blended Growth Anchor (%)": round(growth_est * 100, 2),
-                    "Starting FCF Base ($)": round(base_fcf, 2),
-                    "Discount Rate Used (r)": round(discount_rate, 6),
-                    "Terminal FCF Eligible": stable_positive_fcf,
-                    "Terminal Growth Rate Used": round(base_term_g, 4),
-                    "Terminal Exit Multiple Used": round(
-                        base_fcfe_result["exitMultiple"], 2
-                    ),
-                    "DCF Equity Value ($)": round(base_eq, 2),
-                    "Total Debt ($)": round(total_debt, 2),
-                    "Shares Outstanding": round(float(shares_out), 2),
-                })
-
                 scenario_details = [
                     (
                         "🔴 保守情境計算明細",
@@ -3235,15 +3259,6 @@ if symbol and app_view == "Stock Analysis":
                                 scenario_growth_schedule, start=1
                             )
                         )
-                        st.caption(
-                            f"假設：基準營收 ${annual_revenue / 1e9:.2f}B | 10年 FCFE"
-                            f" 成長率: {stage_text} | 折現率"
-                            f" {scenario_discount * 100:.2f}% | FCFE 轉換率"
-                            f" {cash_flow_conversion_rate * 100:.1f}% | 退出倍數"
-                            f" {exit_multiple:.1f}x | 淨債務"
-                            f" ${net_debt / 1e9:.2f}B | 流通股數"
-                            f" {shares_out / 1e9:.2f}B"
-                        )
                         assumptions = pd.DataFrame({
                             "模型假設": [
                                 "預測年期",
@@ -3281,43 +3296,6 @@ if symbol and app_view == "Stock Analysis":
                         st.dataframe(
                             assumptions, use_container_width=True, hide_index=True
                         )
-                        st.code(
-                            "Revenue_t = Revenue_(t-1) * (1 + revenue_growth)\n"
-                            "Net Income_t = Revenue_t * target_net_margin\n"
-                            "FCFE_t = Net Income_t * cash_flow_conversion_rate\n"
-                            "PV(FCFE_t) = FCFE_t / (1 + discount_rate)^t\n"
-                            "Terminal Value = FCFE_N * exit_multiple\n"
-                            "DCF Value / Share = (sum(PV of FCFE) + PV(Terminal"
-                            " Value)) / Shares",
-                            language="text",
-                        )
-                        dcf_demo = pd.DataFrame({
-                            "年度": [f"Year {year}" for year in range(1, 6)],
-                            "營收成長率": [g * 100 for g in scenario_growth_schedule],
-                            "預估 FCFE ($B)": [fcfe / 1e9 for fcfe in scenario_fcfs],
-                            "折現後 FCFE ($B)": [pv / 1e9 for pv in scenario_pvs],
-                        })
-                        st.dataframe(
-                            dcf_demo.style.format({
-                                "營收成長率": "{:.1f}%",
-                                "預估 FCFE ($B)": "${:.2f}",
-                                "折現後 FCFE ($B)": "${:.2f}",
-                            }),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        demo1, demo2, demo3, demo4, demo5 = st.columns(5)
-                        demo1.metric("退出終值", f"${scenario_tv / 1e9:.2f}B")
-                        demo2.metric("終值現值", f"${scenario_pv_tv / 1e9:.2f}B")
-                        demo3.metric("企業價值 EV", f"${scenario_ev / 1e9:.2f}B")
-                        demo4.metric("股東權益價值", f"${scenario_eq / 1e9:.2f}B")
-                        demo5.metric("每股內在價值", f"${scenario_value:.2f}")
-
-            else:
-                st.error(
-                    "❌ 該公司歷史 Free Cash Flow"
-                    " 持續為負數、數據缺失或無流通股數，無法進行 DCF 現金流估值。"
-                )
 
             # ==========================================
             # 3.5 公司自由現金流 (FCF) 與歷年成長率視覺化圖表
@@ -3330,7 +3308,6 @@ if symbol and app_view == "Stock Analysis":
 
             tot_rev_ttm = info.get("totalRevenue") or annual_revenue or 0
             fcf_margin = (base_fcf / tot_rev_ttm * 100) if tot_rev_ttm > 0 else 0.0
-            
             fcf_per_share = (base_fcf / shares_out) if shares_out > 0 else 0.0
 
             fc1, fc2, fc3, fc4 = st.columns(4)
@@ -3349,147 +3326,11 @@ if symbol and app_view == "Stock Analysis":
                 f"{mkt_cap_val / base_fcf:.2f}x" if base_fcf > 0 else "N/A",
             )
 
-            if len(fcf_history) >= 2 and fcf_dates:
-                fcf_chronological = fcf_history[::-1]
-                dates_chronological = fcf_dates[::-1]
-
-                fcf_series = pd.Series(fcf_chronological)
-                fcf_growth_rates = fcf_series.pct_change() * 100
-
-                fig_fcf = make_subplots(specs=[[{"secondary_y": True}]])
-
-                fig_fcf.add_trace(
-                    go.Bar(
-                        x=dates_chronological,
-                        y=[f / 1e9 for f in fcf_chronological],
-                        name="FCF 金額 ($B)",
-                        marker_color="#00CC96",
-                        opacity=0.85,
-                    ),
-                    secondary_y=False,
-                )
-
-                fig_fcf.add_trace(
-                    go.Scatter(
-                        x=dates_chronological,
-                        y=fcf_growth_rates,
-                        name="FCF 年增率 (YoY %)",
-                        mode="lines+markers+text",
-                        text=[
-                            f"{g:.1f}%" if pd.notna(g) else ""
-                            for g in fcf_growth_rates
-                        ],
-                        textposition="top center",
-                        line=dict(color="#FFD700", width=3),
-                        marker=dict(size=8, color="#FFD700"),
-                    ),
-                    secondary_y=True,
-                )
-
-                fig_fcf.update_layout(
-                    title="公司歷年自由現金流 (FCF) 與 YoY 增長率雙軸趨勢圖",
-                    xaxis_title="財報年度",
-                    height=360,
-                    hovermode="x unified",
-                    margin=dict(t=50, b=20),
-                )
-
-                fig_fcf.update_yaxes(
-                    title_text="<b>FCF 金額 (十億美元)</b>", secondary_y=False
-                )
-                fig_fcf.update_yaxes(
-                    title_text="<b>FCF 年增率 (%)</b>", secondary_y=True
-                )
-
-                st.plotly_chart(fig_fcf, use_container_width=True)
-
             # ==========================================
-            # 4. 5年長期財務成長率與永續性
+            # 5. 技術面量價、均線趨勢分類 & MACD/RSI 獨立背離掃描
             # ==========================================
             st.write("---")
-            st.subheader(
-                "📊 4. 財務成長率與公司永續性分析 (Growth Rate & Long-term History)"
-            )
-
-            growth_view = st.radio(
-                "選擇財務數據維度：",
-                ["歷年年度數據 (5年長期視角 - YoY)", "單季數據 (短期動能 - QoQ)"],
-                index=0,
-                horizontal=True,
-            )
-
-            df_fin_show = q_fin.T if "單季" in growth_view else fin.T
-
-            if (
-                not df_fin_show.empty
-                and "Total Revenue" in df_fin_show.columns
-            ):
-                df_fin_show = df_fin_show.sort_index()
-                revenue = df_fin_show["Total Revenue"] / 1e9
-                net_inc = df_fin_show.get(
-                    "Net Income",
-                    df_fin_show.get("Net Income Common Stockholders"),
-                )
-                if net_inc is not None:
-                    net_inc = net_inc / 1e9
-
-                rev_g = revenue.pct_change() * 100
-                inc_g = net_inc.pct_change() * 100 if net_inc is not None else None
-
-                fig_g = make_subplots(
-                    rows=1,
-                    cols=2,
-                    subplot_titles=("總營收與淨利金額 (10億美元)", "增長率趨勢 (%)"),
-                )
-
-                fig_g.add_trace(
-                    go.Bar(x=revenue.index.astype(str), y=revenue, name="Revenue"),
-                    row=1,
-                    col=1,
-                )
-                if net_inc is not None:
-                    fig_g.add_trace(
-                        go.Bar(
-                            x=net_inc.index.astype(str),
-                            y=net_inc,
-                            name="Net Income",
-                        ),
-                        row=1,
-                        col=1,
-                    )
-
-                fig_g.add_trace(
-                    go.Scatter(
-                        x=rev_g.index.astype(str),
-                        y=rev_g,
-                        name="Revenue Growth %",
-                        mode="lines+markers",
-                    ),
-                    row=1,
-                    col=2,
-                )
-                if inc_g is not None:
-                    fig_g.add_trace(
-                        go.Scatter(
-                            x=inc_g.index.astype(str),
-                            y=inc_g,
-                            name="Income Growth %",
-                            mode="lines+markers",
-                        ),
-                        row=1,
-                        col=2,
-                    )
-
-                fig_g.update_layout(height=350, hovermode="x unified")
-                st.plotly_chart(fig_g, use_container_width=True)
-            else:
-                st.warning("⚠️ 缺乏財務成長率數據。")
-
-            # ==========================================
-            # 5. 技術面量價、均線趨勢分類 (Strong/Weak Bull) & MACD 背離
-            # ==========================================
-            st.write("---")
-            st.subheader("🎯 5. 技術面量價、均線趨勢分類與 MACD 背離掃描")
+            st.subheader("🎯 5. 技術面量價、均線趨勢分類與 MACD / RSI 獨立背離掃描")
 
             if df_hist.empty:
                 st.warning("⚠️ 歷史交易 K 線資料不足，無法繪製技術面指標。")
@@ -3542,49 +3383,19 @@ if symbol and app_view == "Stock Analysis":
                             calculate_advanced_indicators_and_signals(df_hist)
                         )
 
-                        bullish_advanced = [
-                            signal
-                            for signal in advanced_divergences
-                            if signal["type"] == "Bullish"
-                        ]
-                        bearish_advanced = [
-                            signal
-                            for signal in advanced_divergences
-                            if signal["type"] == "Bearish"
-                        ]
-                        if bullish_advanced:
-                            indicators = ", ".join(
-                                sorted({signal["indicator"] for signal in bullish_advanced})
-                            )
-                            st.success(
-                                f"🟢 CPD / MFI Bullish Divergence Detected ({indicators})!"
-                                " Institutional accumulation suspected at lows."
-                            )
-                        if bearish_advanced:
-                            indicators = ", ".join(
-                                sorted({signal["indicator"] for signal in bearish_advanced})
-                            )
-                            st.warning(
-                                f"🔴 CPD / MFI Bearish Divergence Detected ({indicators})!"
-                                " Hidden distribution/selling pressure at highs."
-                            )
-
                         trend_status, trend_desc = classify_trend_status(df_hist)
 
-                        # 🛠️ 【修改重點】讓個股分析直接共用掃描儀的 find_dual_divergences 函數
-                        # 同時回傳並統一背離標準與檢測結果
-                        all_divergences = find_dual_divergences(df_hist, lookback_days=365)
+                        # 🛠️ 【修改重點】MACD 與 RSI 分開獨立掃描
+                        all_divergences = scan_all_macd_divergences(df_hist)
                         if all_divergences:
-                            # 由於 find_dual_divergences 格式包含 Signal Type ("Bullish" / "Bearish")
-                            div_type = "看多背離 (Bullish)" if all_divergences[-1]["Signal Type"] == "Bullish" else "看空背離 (Bearish)"
-                        else:
-                            div_type = "Neutral"
+                            div_type = all_divergences[-1]["type"]
 
                         rsi_divergences = scan_indicator_divergences(
                             df_hist, "RSI14"
                         )
                         if rsi_divergences:
                             rsi_div_type = rsi_divergences[-1]["type"]
+
                         rsi_value = float(df_hist["RSI14"].iloc[-1])
                         bollinger_state = summarize_bollinger_state(df_hist)
 
@@ -3611,8 +3422,6 @@ if symbol and app_view == "Stock Analysis":
 
                         h_max = df_hist["High"].max()
                         l_min = df_hist["Low"].min()
-                        fib_382 = h_max - (h_max - l_min) * 0.382
-                        fib_500 = h_max - (h_max - l_min) * 0.500
                         fib_618 = h_max - (h_max - l_min) * 0.618
 
                         m10_val = df_hist["MA10"].iloc[-1]
@@ -3622,208 +3431,70 @@ if symbol and app_view == "Stock Analysis":
                         st.info(
                             f"📊 **當前趨勢評級：{trend_status}**\n\n{trend_desc}"
                         )
-                        rsi_status = (
-                            "超買"
-                            if rsi_value > 70
-                            else "超賣" if rsi_value < 30 else "中性"
-                        )
-                        st.caption(
-                            f"RSI(14): **{rsi_value:.1f} ({rsi_status})** |"
-                            " Bollinger %B:"
-                            f" **{bollinger_state['percent_b']:.2f}** |"
-                            f" BandWidth: **{bollinger_state['bandwidth']:.2%}**"
-                            f" |"
-                            f" {'⚡ Squeeze' if bollinger_state['squeeze'] else '波動正常'}"
-                            f" | {bollinger_state['tag']}"
-                        )
 
-                        if gunshot_signal:
-                            st.success(
-                                "🔥 **觸發 Livermore 第一槍爆發型態**：今日帶量突破近"
-                                " 20 日高點！"
-                            )
-                        else:
-                            st.caption("ℹ️ 今日未觸發第一槍帶量突破訊號。")
-
-                        with st.expander(
-                            "🔍 點擊查看近 1 年共振背離觸發時間點明細"
-                        ):
-                            if all_divergences:
-                                div_df = pd.DataFrame(all_divergences)[
-                                    ["Trigger Date", "Signal Type", "Price", "MACD"]
-                                ].rename(columns={
-                                    "Trigger Date": "Trigger Date",
-                                    "Signal Type": "Signal",
-                                    "Price": "Trigger Price ($)",
-                                    "MACD": "MACD at Trigger",
-                                })
-                                div_df["Trigger Date"] = pd.to_datetime(
-                                    div_df["Trigger Date"]
-                                ).dt.strftime("%Y-%m-%d")
-                                st.dataframe(
-                                    div_df,
-                                    use_container_width=True,
-                                    hide_index=True,
-                                )
-                            else:
-                                st.info("近 1 年區間內未偵測到同步背離點位。")
-
-                        with st.expander("📐 RSI(14) 背離與 Bollinger Band 訊號"):
-                            if rsi_divergences:
-                                rsi_df = pd.DataFrame(rsi_divergences)[
-                                    ["date", "type", "price", "indicator"]
-                                ].rename(columns={
-                                    "date": "Trigger Date",
-                                    "type": "Signal",
-                                    "price": "Trigger Price ($)",
-                                    "indicator": "RSI at Trigger",
-                                })
-                                rsi_df["Trigger Date"] = pd.to_datetime(
-                                    rsi_df["Trigger Date"]
-                                ).dt.strftime("%Y-%m-%d")
-                                st.dataframe(
-                                    rsi_df,
-                                    use_container_width=True,
-                                    hide_index=True,
-                                )
-                            else:
-                                st.info("近 2 年區間內未偵測到顯著 RSI 背離。")
-
-                        st.subheader("📊 CPD / MFI / Order Flow Delta Divergence Triggers")
-                        if advanced_divergences:
-                            advanced_divergence_df = pd.DataFrame([
-                                {
-                                    "Indicator": signal["indicator"],
-                                    "Signal": signal["type"],
-                                    "Trigger Date": pd.Timestamp(
-                                        signal["date"]
-                                    ).strftime("%Y-%m-%d"),
-                                    "Trigger Price ($)": signal["price"],
-                                    "Delta at Trigger": signal[
-                                        "delta_at_trigger"
-                                    ],
-                                    "CPD at Trigger": signal[
-                                        "cpd_at_trigger"
-                                    ],
-                                    "MFI (14) at Trigger": signal[
-                                        "mfi_at_trigger"
-                                    ],
-                                }
-                                for signal in advanced_divergences
-                            ])
-                            st.dataframe(
-                                advanced_divergence_df.style.format({
-                                    "Trigger Price ($)": "${:.2f}",
-                                    "Delta at Trigger": "{:,.0f}",
-                                    "CPD at Trigger": "{:,.0f}",
-                                    "MFI (14) at Trigger": "{:.1f}",
-                                }),
-                                use_container_width=True,
-                                hide_index=True,
-                            )
-                        else:
-                            st.info(
-                                "No CPD or MFI divergence trigger was detected in"
-                                " the latest 30 bars."
-                            )
+                        with st.expander("🔍 獨立查看 MACD 與 RSI 背離記錄"):
+                            col_mac, col_rsi = st.columns(2)
+                            with col_mac:
+                                st.markdown("##### MACD Divergences")
+                                if all_divergences:
+                                    mac_df = pd.DataFrame(all_divergences)[
+                                        ["date", "type", "price", "macd"]
+                                    ].rename(columns={"date": "Date", "type": "Signal", "price": "Price", "macd": "MACD"})
+                                    mac_df["Date"] = pd.to_datetime(mac_df["Date"]).dt.strftime("%Y-%m-%d")
+                                    st.dataframe(mac_df, use_container_width=True, hide_index=True)
+                                else:
+                                    st.caption("無 MACD 背離")
+                            with col_rsi:
+                                st.markdown("##### RSI(14) Divergences")
+                                if rsi_divergences:
+                                    rsi_df = pd.DataFrame(rsi_divergences)[
+                                        ["date", "type", "price", "indicator"]
+                                    ].rename(columns={"date": "Date", "type": "Signal", "price": "Price", "indicator": "RSI"})
+                                    rsi_df["Date"] = pd.to_datetime(rsi_df["Date"]).dt.strftime("%Y-%m-%d")
+                                    st.dataframe(rsi_df, use_container_width=True, hide_index=True)
+                                else:
+                                    st.caption("無 RSI 背離")
 
                         # ==========================================
-                        # 6. 關鍵支撐/壓力位與黃金分割
+                        # 7. 機構級全方位分析報告
                         # ==========================================
                         st.write("---")
                         st.subheader(
-                            "🛡️ 6. 關鍵支撐/壓力位、籌碼密集區 (POC)"
-                            " 與斐波那契黃金分割"
+                            "📝 7. 全方位技術面與機構交易決策報告 (Institutional Analysis Report)"
                         )
 
-                        k1, k2, k3, k4, k5 = st.columns(5)
-                        k1.metric(
-                            "波段壓力位 (Resistance)", f"${resistance_level:.2f}"
+                        narrative_output = generate_technical_narrative(
+                            symbol,
+                            curr_price,
+                            m10_val,
+                            m20_val,
+                            m55_val,
+                            ma250_val,
+                            gunshot_signal,
+                            div_type,
+                            support_level,
+                            resistance_level,
+                            fib_618,
+                            poc_price,
+                            trend_status,
+                            trend_desc,
+                            ma250_valid=ma250_valid,
+                            rsi_value=rsi_value,
+                            rsi_div_type=rsi_div_type,
+                            bollinger_state=bollinger_state,
+                            macd_divergence=bool(all_divergences),
                         )
-                        k2.metric("波段支撐位 (Support)", f"${support_level:.2f}")
-                        k3.metric("籌碼密集區 (POC)", f"${poc_price:.2f}")
-                        k4.metric("斐波那契 (61.8%)", f"${fib_618:.2f}")
-                        k5.metric("目前最新股價", f"${curr_price:.2f}")
+                        st.markdown(narrative_output)
 
             # ==========================================
-            # 7. 機構級全方位分析報告
+            # 9. Interactive Plotly Chart (含雙信號同日共振提示)
             # ==========================================
             st.write("---")
             st.subheader(
-                "📝 7. 全方位技術面與機構交易決策報告 (Institutional Analysis"
-                " Report)"
+                "📈 9. Price / MACD / RSI / Order Flow Delta Chart"
             )
 
-            narrative_output = generate_technical_narrative(
-                symbol,
-                curr_price,
-                m10_val,
-                m20_val,
-                m55_val,
-                ma250_val,
-                gunshot_signal,
-                div_type,
-                support_level,
-                resistance_level,
-                fib_618,
-                poc_price,
-                trend_status,
-                trend_desc,
-                ma250_valid=ma250_valid,
-                rsi_value=rsi_value,
-                rsi_div_type=rsi_div_type,
-                bollinger_state=bollinger_state,
-                macd_divergence=bool(all_divergences),
-            )
-            st.markdown(narrative_output)
-
-            # ==========================================
-            # 8. 綜合投資評級 Engine
-            # ==========================================
-            st.write("---")
-            st.subheader(
-                "🏆 8. 綜合投資評級與實戰決策 (Factor-Based Rating Engine)"
-            )
-
-            fund_score = 35 if (base_val and base_val > curr_price) else 20
-            tech_score = (
-                25
-                if "Bull" in trend_status or gunshot_signal or "Bullish" in div_type
-                else 15
-            )
-            total_score = fund_score + tech_score
-
-            if total_score >= 50:
-                rating_str = "🟢 買入 / 逢低佈局 (BUY / ACCUMULATE)"
-            elif total_score >= 35:
-                rating_str = "🟡 觀望 / 保持中立 (HOLD)"
-            else:
-                rating_str = "🔴 賣出 / 減碼避險 (SELL / REDUCE)"
-
-            st.markdown(f"### 綜合評級：{rating_str}")
-            st.markdown(f"#### 機構綜合評分：**{total_score} / 100**")
-
-            st.markdown(f"""
-            **【多因素量化評分明細】**
-            * **基本面得分 ({fund_score}/50)**：DCF估值 ({'✓ 高於現價' if base_val and base_val > curr_price else '✗ 低於現價'}) | Z-Score ({z_status})
-            * **技術面得分 ({tech_score}/50)**：趨勢架構 ({trend_status}) | 背離 ({div_type}) | Livermore第一槍 ({'✓ 觸發' if gunshot_signal else '✗ 未觸發'})
-            
-            💡 **最終操作建議**：對 {symbol} 給予 **{rating_str}** 評級。關鍵風險控管區間落於支撐位 **${support_level:.2f}**。
-            """)
-
-            # ==========================================
-            # 9. Interactive Plotly Chart
-            # ==========================================
-            st.write("---")
-            st.subheader(
-                "📈 9. Price / MFI / Order Flow Delta / CPD Chart"
-            )
-
-            if (
-                not df_hist.empty
-                and len(df_hist) >= 20
-                and {"MFI14", "Delta", "CPD"}.issubset(df_hist.columns)
-            ):
+            if not df_hist.empty and len(df_hist) >= 20:
                 fig_k = make_subplots(
                     rows=4,
                     cols=1,
@@ -3831,8 +3502,8 @@ if symbol and app_view == "Stock Analysis":
                     vertical_spacing=0.025,
                     row_heights=[0.50, 0.15, 0.15, 0.20],
                     subplot_titles=(
-                        "Price / Signal Turns / Divergences",
-                        "MFI (14)",
+                        "Price / MACD & RSI Independent Signals (Both Hit Highlight)",
+                        "RSI (14)",
                         "Order Flow Delta",
                         "CPD (Cumulative Volume Delta)",
                     ),
@@ -3849,288 +3520,87 @@ if symbol and app_view == "Stock Analysis":
                     row=1,
                     col=1,
                 )
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["BB_Upper"],
-                        name="BB Upper",
-                        line=dict(color="#B388FF", width=1),
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["BB_Lower"],
-                        name="BB Lower",
-                        line=dict(color="#B388FF", width=1),
-                        fill="tonexty",
-                        fillcolor="rgba(179, 136, 255, 0.12)",
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["BB_Middle"],
-                        name="BB Middle",
-                        line=dict(color="#CE93D8", width=1, dash="dot"),
-                    ),
-                    row=1,
-                    col=1,
-                )
 
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["MA10"],
-                        name="MA10 (Yellow)",
-                        line=dict(color="#FFEB3B", width=1.2),
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["MA20"],
-                        name="MA20 (Blue)",
-                        line=dict(color="#2196F3", width=1.5),
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["MA55"],
-                        name="MA55 (Green)",
-                        line=dict(color="#4CAF50", width=1.8),
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["EMA20"],
-                        name="EMA20",
-                        line=dict(color="#00D4FF", width=1.8),
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["EMA50"],
-                        name="EMA50",
-                        line=dict(color="#FF9F1C", width=1.8),
-                    ),
-                    row=1,
-                    col=1,
-                )
-
-                if ma250_valid:
-                    fig_k.add_trace(
-                        go.Scatter(
-                            x=df_hist.index,
-                            y=df_hist["MA250"],
-                            name="MA250 (Red)",
-                            line=dict(color="#F44336", width=2.2),
-                        ),
-                        row=1,
-                        col=1,
-                    )
-
-                fig_k.add_hline(
-                    y=support_level,
-                    line_dash="dash",
-                    line_color="green",
-                    annotation_text="Support",
-                    row=1,
-                    col=1,
-                )
-                fig_k.add_hline(
-                    y=resistance_level,
-                    line_dash="dash",
-                    line_color="red",
-                    annotation_text="Resistance",
-                    row=1,
-                    col=1,
-                )
-                fig_k.add_hline(
-                    y=poc_price,
-                    line_color="gold",
-                    annotation_text="POC Area",
-                    row=1,
-                    col=1,
-                )
-
-                entry_mask = df_hist["Signal_Hist_Turn"].fillna(False).astype(bool)
-                exit_mask = df_hist["Signal_Hist_Exit"].fillna(False).astype(bool)
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index[entry_mask],
-                        y=df_hist.loc[entry_mask, "Close"],
-                        mode="markers",
-                        name="Signal_Hist_Turn Entry",
-                        marker=dict(color="#2A9D8F", symbol="triangle-up", size=11),
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index[exit_mask],
-                        y=df_hist.loc[exit_mask, "Close"],
-                        mode="markers",
-                        name="Histogram Exit",
-                        marker=dict(color="#E76F51", symbol="triangle-down", size=11),
-                    ),
-                    row=1,
-                    col=1,
-                )
-
-                for divergence in advanced_divergences:
-                    divergence_color = (
-                        "#2A9D8F" if divergence["type"] == "Bullish" else "#E76F51"
-                    )
-                    fig_k.add_trace(
-                        go.Scatter(
-                            x=[divergence["first_date"], divergence["date"]],
-                            y=[divergence["first_price"], divergence["price"]],
-                            mode="lines+markers",
-                            name=(
-                                f"{divergence['indicator']} "
-                                f"{divergence['type']} Divergence"
-                            ),
-                            line=dict(color=divergence_color, width=2),
-                            marker=dict(size=9, symbol="diamond"),
-                        ),
-                        row=1,
-                        col=1,
-                    )
-                    indicator_row = 4 if divergence["indicator"] == "CPD" else 2
-                    fig_k.add_trace(
-                        go.Scatter(
-                            x=[divergence["first_date"], divergence["date"]],
-                            y=[
-                                divergence["first_indicator_value"],
-                                divergence["indicator_value"],
-                            ],
-                            mode="lines+markers",
-                            name=f"{divergence['indicator']} divergence pivots",
-                            line=dict(color=divergence_color, width=2),
-                            marker=dict(size=8, symbol="diamond"),
-                            showlegend=False,
-                        ),
-                        row=indicator_row,
-                        col=1,
-                    )
-
+                # 🛠️ 【修改重點：比對 MACD 與 RSI 日期，如果同日觸發則在上方特別標註雙信號】
+                macd_dates = {pd.Timestamp(d["date"]).normalize(): d for d in all_divergences}
+                rsi_dates = {pd.Timestamp(d["date"]).normalize(): d for d in rsi_divergences}
+                
+                # 獨立標註 MACD
                 for div in all_divergences:
-                    color_tag = "green" if div["Signal Type"] == "Bullish" else "red"
+                    d_norm = pd.Timestamp(div["date"]).normalize()
+                    is_both = d_norm in rsi_dates
+                    
+                    label_text = "⭐ BOTH HIT (MACD+RSI)" if is_both else ("MACD Bull" if "看多" in div["type"] else "MACD Bear")
+                    color_tag = "green" if "看多" in div["type"] else "red"
+                    
                     fig_k.add_annotation(
-                        x=div["Trigger Date"],
-                        y=div["Price"],
-                        text=" Bull" if div["Signal Type"] == "Bullish" else " Bear",
+                        x=div["date"],
+                        y=div["price"],
+                        text=label_text,
                         showarrow=True,
                         arrowhead=2,
                         arrowcolor=color_tag,
                         ax=0,
-                        ay=-25 if div["Signal Type"] == "Bullish" else 25,
+                        ay=-35 if "看多" in div["type"] else 35,
                         row=1,
                         col=1,
                     )
 
+                # 獨立標註純 RSI（未與 MACD 同日時）
+                for div in rsi_divergences:
+                    d_norm = pd.Timestamp(div["date"]).normalize()
+                    if d_norm not in macd_dates: # 避免與 MACD 重複標註
+                        color_tag = "green" if "看多" in div["type"] else "orange"
+                        fig_k.add_annotation(
+                            x=div["date"],
+                            y=div["price"],
+                            text="RSI Bull" if "看多" in div["type"] else "RSI Bear",
+                            showarrow=True,
+                            arrowhead=2,
+                            arrowcolor=color_tag,
+                            ax=0,
+                            ay=-20 if "看多" in div["type"] else 20,
+                            row=1,
+                            col=1,
+                        )
+
+                # 繪製 RSI 子圖
                 fig_k.add_trace(
                     go.Scatter(
                         x=df_hist.index,
-                        y=df_hist["MFI14"],
-                        name="MFI (14)",
+                        y=df_hist["RSI14"],
+                        name="RSI (14)",
                         line=dict(color="#00BFA5", width=2),
                     ),
                     row=2,
                     col=1,
                 )
-                fig_k.add_hline(
-                    y=80,
-                    line_dash="dash",
-                    line_color="#EF5350",
-                    annotation_text="Overbought 80",
-                    row=2,
-                    col=1,
-                )
-                fig_k.add_hline(
-                    y=20,
-                    line_dash="dash",
-                    line_color="#42A5F5",
-                    annotation_text="Oversold 20",
-                    row=2,
-                    col=1,
-                )
+                fig_k.add_hline(y=70, line_dash="dash", line_color="#EF5350", annotation_text="Overbought 70", row=2, col=1)
+                fig_k.add_hline(y=30, line_dash="dash", line_color="#42A5F5", annotation_text="Oversold 30", row=2, col=1)
 
-                fig_k.add_trace(
-                    go.Bar(
-                        x=df_hist.index,
-                        name="Order Flow Delta",
-                        y=df_hist["Delta"],
-                        marker_color=np.where(
-                            df_hist["Delta"] >= 0, "#2A9D8F", "#E76F51"
+                # 繪製 Delta 與 CPD
+                if "Delta" in df_hist.columns and "CPD" in df_hist.columns:
+                    fig_k.add_trace(
+                        go.Bar(
+                            x=df_hist.index,
+                            name="Order Flow Delta",
+                            y=df_hist["Delta"],
+                            marker_color=np.where(df_hist["Delta"] >= 0, "#2A9D8F", "#E76F51"),
                         ),
-                    ),
-                    row=3,
-                    col=1,
-                )
-                fig_k.add_trace(
-                    go.Scatter(
-                        x=df_hist.index,
-                        y=df_hist["CPD"],
-                        name="CPD",
-                        line=dict(color="#00CFE8", width=2),
-                    ),
-                    row=4,
-                    col=1,
-                )
-
-                scanner_signal = st.session_state.get("selected_scanner_signal")
-                if scanner_signal and scanner_signal.get("Ticker") == symbol:
-                    trigger_date = pd.Timestamp(scanner_signal["Trigger Date"])
-                    signal_color = (
-                        "green"
-                        if scanner_signal["Signal Type"] == "Bullish"
-                        else "red"
-                    )
-                    fig_k.add_vline(
-                        x=trigger_date,
-                        line_dash="dash",
-                        line_color=signal_color,
-                        annotation_text=f"{scanner_signal['Signal Type']} trigger",
-                        row=1,
+                        row=3,
                         col=1,
                     )
-                    pivot_dates = [
-                        pd.Timestamp(scanner_signal["First Date"]),
-                        trigger_date,
-                    ]
                     fig_k.add_trace(
                         go.Scatter(
-                            x=pivot_dates,
-                            y=[
-                                scanner_signal["First Price"],
-                                scanner_signal["Second Price"],
-                            ],
-                            mode="lines+markers",
-                            name="Dual divergence price pivots",
-                            line=dict(color=signal_color, width=3),
-                            marker=dict(size=8),
+                            x=df_hist.index,
+                            y=df_hist["CPD"],
+                            name="CPD",
+                            line=dict(color="#00CFE8", width=2),
                         ),
-                        row=1,
+                        row=4,
                         col=1,
                     )
+
                 fig_k.update_yaxes(range=[0, 100], row=2, col=1)
                 fig_k.update_layout(
                     height=900,
@@ -4138,26 +3608,12 @@ if symbol and app_view == "Stock Analysis":
                     margin=dict(t=35, b=20),
                 )
                 st.plotly_chart(fig_k, use_container_width=True)
-            elif not df_hist.empty:
-                st.info("Advanced price-volume indicators are unavailable for this ticker.")
 
             # ==========================================
             # 10. Embedded TradingView Chart
             # ==========================================
             st.write("---")
-            st.subheader(
-                "📺 10. TradingView 官方進階技術圖表 (SMA 10/20/55/250 & 白色"
-                " Volume MA55)"
-            )
-            st.markdown(
-                '<div style="display:flex;gap:18px;flex-wrap:wrap;font-weight:600;">'
-                '<span style="color:#FFD166;">● MA10</span>'
-                '<span style="color:#00D4FF;">● MA20</span>'
-                '<span style="color:#7CFF6B;">● MA55</span>'
-                '<span style="color:#FF5C8A;">● MA250</span>'
-                "</div>",
-                unsafe_allow_html=True,
-            )
+            st.subheader("📺 10. TradingView 官方進階技術圖表")
             tv_symbol = map_symbol_for_tradingview(symbol)
             tv_html = f"""
             <div class="tradingview-widget-container" style="height:550px;width:100%;">
@@ -4172,142 +3628,12 @@ if symbol and app_view == "Stock Analysis":
                 "theme": "dark",
                 "style": "1",
                 "locale": "zh_TW",
-                "toolbar_bg": "#f1f3f6",
-                "enable_publishing": false,
-                "allow_symbol_change": true,
-                "container_id": "tradingview_chart",
-                "studies": [
-                  {{
-                    "id": "MASimple@tv-basicstudies",
-                    "inputs": {{ "length": 10 }},
-                    "overrides": {{ "Plot.color": "#FFD166", "Plot.linewidth": 3 }}
-                  }},
-                  {{
-                    "id": "MASimple@tv-basicstudies",
-                    "inputs": {{ "length": 20 }},
-                    "overrides": {{ "Plot.color": "#00D4FF", "Plot.linewidth": 3 }}
-                  }},
-                  {{
-                    "id": "MASimple@tv-basicstudies",
-                    "inputs": {{ "length": 55 }},
-                    "overrides": {{ "Plot.color": "#7CFF6B", "Plot.linewidth": 3 }}
-                  }},
-                  {{
-                    "id": "MASimple@tv-basicstudies",
-                    "inputs": {{ "length": 250 }},
-                    "overrides": {{ "Plot.color": "#FF5C8A", "Plot.linewidth": 3 }}
-                  }},
-                  {{
-                    "id": "Volume@tv-basicstudies",
-                    "inputs": {{ "showMA": true, "maLength": 55 }}
-                  }}
-                ],
-                "studies_overrides": {{
-                    "volume.volume ma.color": "#FFFFFF",
-                    "volume.volume ma.linewidth": 2
-                }}
+                "container_id": "tradingview_chart"
               }});
               </script>
             </div>
             """
             components.html(tv_html, height=560)
-
-            # ==========================================
-            # 11. 選擇權深度分析與大單異常籌碼掃描
-            # ==========================================
-            st.write("---")
-            st.subheader(
-                "11. 選擇權深度分析與大單異常籌碼掃描 (Options Analysis & Unusual"
-                " Options Flow)"
-            )
-            options_summary = fetch_options_analysis(symbol, curr_price)
-            if not options_summary.get("available"):
-                st.info(
-                    f"ℹ️ {options_summary.get('message', '此標的沒有可用的選擇權市場資料。')}"
-                    " 非美股（例如 .TW、.HK）通常不提供 yfinance"
-                    " 可讀取的選擇權鏈；其餘股票分析不受影響。"
-                )
-            else:
-                pcr_volume = options_summary.get("pcr_volume", np.nan)
-                pcr_oi = options_summary.get("pcr_oi", np.nan)
-                iv_summary = options_summary.get("iv_summary", {})
-                overview_1, overview_2, overview_3, overview_4 = st.columns(4)
-                overview_1.metric(
-                    "Put/Call Ratio (Volume)",
-                    (
-                        f"{pcr_volume:.2f}"
-                        if pd.notna(pcr_volume)
-                        else "N/A"
-                    ),
-                )
-                overview_2.metric(
-                    "Put/Call Ratio (OI)",
-                    f"{pcr_oi:.2f}" if pd.notna(pcr_oi) else "N/A",
-                )
-                overview_3.metric(
-                    "Max Pain Price",
-                    (
-                        f"${options_summary['max_pain']:.2f}"
-                        if pd.notna(options_summary.get("max_pain"))
-                        else "N/A"
-                    ),
-                )
-                overview_4.metric(
-                    "NTM Put IV - Call IV",
-                    (
-                        f"{iv_summary.get('Put-Call IV Skew', np.nan) * 100:.2f}%"
-                        if pd.notna(iv_summary.get("Put-Call IV Skew"))
-                        else "N/A"
-                    ),
-                )
-
-                st.caption(
-                    f"掃描到期日：{', '.join(options_summary['expirations'])} |"
-                    f" NTM Call IV:"
-                    f" {iv_summary.get('Call IV', np.nan) * 100:.2f}% | NTM Put"
-                    f" IV: {iv_summary.get('Put IV', np.nan) * 100:.2f}%"
-                    if pd.notna(iv_summary.get("Call IV"))
-                    and pd.notna(iv_summary.get("Put IV"))
-                    else (
-                        f"掃描到期日：{', '.join(options_summary['expirations'])} |"
-                        " NTM IV 資料不足"
-                    )
-                )
-
-                st.markdown(
-                    "##### 🔎 Smart Money Unusual Flow（Volume > 2.5 × OI 且 Volume"
-                    " > 1,000）"
-                )
-                unusual_flow = options_summary.get(
-                    "unusual", pd.DataFrame()
-                ).copy()
-                if unusual_flow.empty:
-                    st.info(
-                        "近 45 天到期選擇權中沒有符合異常大單條件的合約。"
-                    )
-                else:
-                    unusual_flow["Implied Volatility"] = (
-                        unusual_flow["Implied Volatility"] * 100
-                    )
-                    unusual_flow["Vol/OI Ratio"] = unusual_flow[
-                        "Vol/OI Ratio"
-                    ].replace(np.inf, np.nan)
-                    st.dataframe(
-                        unusual_flow.style.format({
-                            "Strike Price": "${:.2f}",
-                            "Volume": "{:.0f}",
-                            "Open Interest": "{:.0f}",
-                            "Vol/OI Ratio": "{:.2f}x",
-                            "Implied Volatility": "{:.2f}%",
-                            "Estimated Trade Value": "${:,.0f}",
-                        }),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-                st.info(
-                    "🤖 **AI Flow Interpretation**："
-                    f" {interpret_options_flow(options_summary)}"
-                )
 
     except Exception as e:
         st.error(f"分析時發生未預期錯誤: {e}")
