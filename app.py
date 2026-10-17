@@ -631,8 +631,10 @@ def fetch_portfolio_quote(symbol):
         return 1.0, 0.0
 
 
-def find_dual_divergences(history, lookback_days=90, window=3):
-    """Compare RSI and MACD at matching price pivots within the lookback window."""
+def find_dual_divergences(history, lookback_days=365, window=3):
+    """Compare RSI and MACD at matching price pivots within the lookback window.
+       Updated lookback_days default to 365 so individual Stock Analysis views
+       match and include signals over a full year."""
     required = {"High", "Low", "Close"}
     if history.empty or not required.issubset(history.columns):
         return []
@@ -1185,74 +1187,6 @@ def classify_trend_status(df):
         )
 
     return status, desc
-
-
-def scan_all_macd_divergences(df, window=5, min_gap_days=10):
-    if len(df) < 60 or "MACD" not in df.columns:
-        return []
-
-    raw_divergences = []
-    prices = df["Close"].values
-    macds = df["MACD"].values
-    dates = df.index
-    n = len(df)
-
-    piv_lows = []
-    piv_highs = []
-
-    for i in range(window, n - window):
-        if all(prices[i] <= prices[i - j] for j in range(1, window + 1)) and all(
-            prices[i] <= prices[i + j] for j in range(1, window + 1)
-        ):
-            piv_lows.append((i, dates[i], prices[i], macds[i]))
-
-        if all(prices[i] >= prices[i - j] for j in range(1, window + 1)) and all(
-            prices[i] >= prices[i + j] for j in range(1, window + 1)
-        ):
-            piv_highs.append((i, dates[i], prices[i], macds[i]))
-
-    for k in range(1, len(piv_lows)):
-        i2, d2, p2, m2 = piv_lows[k]
-        i1, d1, p1, m1 = piv_lows[k - 1]
-        if (i2 - i1) <= 60:
-            if p2 < p1 and m2 > m1:
-                raw_divergences.append({
-                    "index": i2,
-                    "date": d2,
-                    "type": "看多背離 (Bullish)",
-                    "price": p2,
-                    "macd": m2,
-                })
-
-    for k in range(1, len(piv_highs)):
-        i2, d2, p2, m2 = piv_highs[k]
-        i1, d1, p1, m1 = piv_highs[k - 1]
-        if (i2 - i1) <= 60:
-            if p2 > p1 and m2 < m1:
-                raw_divergences.append({
-                    "index": i2,
-                    "date": d2,
-                    "type": "看空背離 (Bearish)",
-                    "price": p2,
-                    "macd": m2,
-                })
-
-    raw_divergences.sort(key=lambda x: x["index"])
-
-    filtered_divergences = []
-    for div in raw_divergences:
-        if not filtered_divergences:
-            filtered_divergences.append(div)
-        else:
-            last_div = filtered_divergences[-1]
-            if (
-                div["index"] - last_div["index"]
-            ) >= min_gap_days or div["type"] != last_div["type"]:
-                filtered_divergences.append(div)
-            else:
-                filtered_divergences[-1] = div
-
-    return filtered_divergences
 
 
 def scan_indicator_divergences(df, indicator_column, window=5, min_gap_days=10):
@@ -3637,9 +3571,15 @@ if symbol and app_view == "Stock Analysis":
 
                         trend_status, trend_desc = classify_trend_status(df_hist)
 
-                        all_divergences = scan_all_macd_divergences(df_hist)
+                        # 🛠️ 【修改重點】讓個股分析直接共用掃描儀的 find_dual_divergences 函數
+                        # 同時回傳並統一背離標準與檢測結果
+                        all_divergences = find_dual_divergences(df_hist, lookback_days=365)
                         if all_divergences:
-                            div_type = all_divergences[-1]["type"]
+                            # 由於 find_dual_divergences 格式包含 Signal Type ("Bullish" / "Bearish")
+                            div_type = "看多背離 (Bullish)" if all_divergences[-1]["Signal Type"] == "Bullish" else "看空背離 (Bearish)"
+                        else:
+                            div_type = "Neutral"
+
                         rsi_divergences = scan_indicator_divergences(
                             df_hist, "RSI14"
                         )
@@ -3706,16 +3646,16 @@ if symbol and app_view == "Stock Analysis":
                             st.caption("ℹ️ 今日未觸發第一槍帶量突破訊號。")
 
                         with st.expander(
-                            "🔍 點擊查看近 2 年歷史 MACD 背離觸發時間點明細"
+                            "🔍 點擊查看近 1 年共振背離觸發時間點明細"
                         ):
                             if all_divergences:
                                 div_df = pd.DataFrame(all_divergences)[
-                                    ["date", "type", "price", "macd"]
+                                    ["Trigger Date", "Signal Type", "Price", "MACD"]
                                 ].rename(columns={
-                                    "date": "Trigger Date",
-                                    "type": "Signal",
-                                    "price": "Trigger Price ($)",
-                                    "macd": "MACD at Trigger",
+                                    "Trigger Date": "Trigger Date",
+                                    "Signal Type": "Signal",
+                                    "Price": "Trigger Price ($)",
+                                    "MACD": "MACD at Trigger",
                                 })
                                 div_df["Trigger Date"] = pd.to_datetime(
                                     div_df["Trigger Date"]
@@ -3726,7 +3666,7 @@ if symbol and app_view == "Stock Analysis":
                                     hide_index=True,
                                 )
                             else:
-                                st.info("近 2 年區間內未偵測到顯著 MACD 背離點位。")
+                                st.info("近 1 年區間內未偵測到同步背離點位。")
 
                         with st.expander("📐 RSI(14) 背離與 Bollinger Band 訊號"):
                             if rsi_divergences:
@@ -4092,16 +4032,16 @@ if symbol and app_view == "Stock Analysis":
                     )
 
                 for div in all_divergences:
-                    color_tag = "green" if "看多" in div["type"] else "red"
+                    color_tag = "green" if div["Signal Type"] == "Bullish" else "red"
                     fig_k.add_annotation(
-                        x=div["date"],
-                        y=div["price"],
-                        text=" Bull" if "看多" in div["type"] else " Bear",
+                        x=div["Trigger Date"],
+                        y=div["Price"],
+                        text=" Bull" if div["Signal Type"] == "Bullish" else " Bear",
                         showarrow=True,
                         arrowhead=2,
                         arrowcolor=color_tag,
                         ax=0,
-                        ay=-25 if "看多" in div["type"] else 25,
+                        ay=-25 if div["Signal Type"] == "Bullish" else 25,
                         row=1,
                         col=1,
                     )
