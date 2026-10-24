@@ -719,6 +719,142 @@ def find_dual_divergences(history, lookback_days=365, window=3):
     return sorted(signals, key=lambda signal: signal["Trigger Date"])
 
 
+def find_four_indicator_confluences(
+    history, lookback_days=90, window=3, max_pivot_gap_days=14
+):
+    required = {"High", "Low", "Close", "Volume"}
+    if history.empty or not required.issubset(history.columns):
+        return []
+
+    data, _ = calculate_advanced_indicators_and_signals(history)
+    data = data.dropna(subset=["High", "Low", "Close"]).sort_index().copy()
+    data["RSI"] = calculate_rsi(data["Close"], 14)
+    cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=lookback_days)
+    if getattr(data.index, "tz", None) is not None:
+        cutoff = cutoff.tz_localize(data.index.tz)
+
+    indicator_columns = {
+        "RSI": "RSI",
+        "MACD": "MACD",
+        "CPD": "CPD",
+        "MFI": "MFI14",
+    }
+    divergences_by_direction = {
+        direction: {name: [] for name in indicator_columns}
+        for direction in ("Bullish", "Bearish")
+    }
+    low_prices = data["Low"].to_numpy(dtype=float)
+    high_prices = data["High"].to_numpy(dtype=float)
+    low_pivots = []
+    high_pivots = []
+
+    for index in range(window, len(data) - window):
+        if all(
+            low_prices[index] <= low_prices[index - offset]
+            and low_prices[index] <= low_prices[index + offset]
+            for offset in range(1, window + 1)
+        ):
+            low_pivots.append(index)
+        if all(
+            high_prices[index] >= high_prices[index - offset]
+            and high_prices[index] >= high_prices[index + offset]
+            for offset in range(1, window + 1)
+        ):
+            high_pivots.append(index)
+
+    for indicator_name, column in indicator_columns.items():
+        values = data[column].to_numpy(dtype=float)
+        for pivots, bullish in ((low_pivots, True), (high_pivots, False)):
+            valid_pivots = [index for index in pivots if np.isfinite(values[index])]
+            for first, second in zip(valid_pivots, valid_pivots[1:]):
+                if second - first > 60 or data.index[second] < cutoff:
+                    continue
+                first_price = low_prices[first] if bullish else high_prices[first]
+                second_price = low_prices[second] if bullish else high_prices[second]
+                is_divergence = (
+                    second_price < first_price and values[second] > values[first]
+                    if bullish
+                    else second_price > first_price and values[second] < values[first]
+                )
+                if is_divergence:
+                    direction = "Bullish" if bullish else "Bearish"
+                    divergences_by_direction[direction][indicator_name].append({
+                        "index": second,
+                        "date": data.index[second],
+                        "price": float(second_price),
+                        "value": float(values[second]),
+                    })
+
+    confluences = []
+    for direction, by_indicator in divergences_by_direction.items():
+        anchor_dates = sorted({
+            signal["date"]
+            for signals in by_indicator.values()
+            for signal in signals
+        })
+        seen_pivots = set()
+        for anchor_date in anchor_dates:
+            aligned = {}
+            for indicator_name, signals in by_indicator.items():
+                recent_signals = [
+                    signal
+                    for signal in signals
+                    if signal["date"] <= anchor_date
+                    and (
+                        anchor_date.normalize() - signal["date"].normalize()
+                    ).days <= max_pivot_gap_days
+                ]
+                if not recent_signals:
+                    break
+                aligned[indicator_name] = recent_signals[-1]
+            if len(aligned) != len(indicator_columns):
+                continue
+
+            pivot_dates = [signal["date"] for signal in aligned.values()]
+            pivot_window = (
+                max(date.normalize() for date in pivot_dates)
+                - min(date.normalize() for date in pivot_dates)
+            ).days
+            if pivot_window > max_pivot_gap_days:
+                continue
+            pivot_key = (
+                direction,
+                tuple(aligned[name]["date"] for name in indicator_columns),
+            )
+            if pivot_key in seen_pivots:
+                continue
+            seen_pivots.add(pivot_key)
+
+            trigger = max(aligned.values(), key=lambda signal: signal["date"])
+            trigger_index = trigger["index"]
+            trigger_close = float(data["Close"].iloc[trigger_index])
+            latest_price = float(data["Close"].iloc[-1])
+            price_change = latest_price - trigger_close
+            confluences.append({
+                "Signal Type": direction,
+                "Trigger Date": trigger["date"],
+                "Price": trigger["price"],
+                "Trigger Close": trigger_close,
+                "Latest Price": latest_price,
+                "Change ($)": price_change,
+                "Change (%)": (
+                    price_change / trigger_close * 100 if trigger_close else np.nan
+                ),
+                "RSI": aligned["RSI"]["value"],
+                "MACD": aligned["MACD"]["value"],
+                "CPD": aligned["CPD"]["value"],
+                "MFI": aligned["MFI"]["value"],
+                "Pivot Window (days)": pivot_window,
+                "Confirmed Indicators": "MACD, RSI, CPD, MFI",
+                **{
+                    f"{name} Pivot Date": signal["date"]
+                    for name, signal in aligned.items()
+                },
+            })
+
+    return sorted(confluences, key=lambda signal: signal["Trigger Date"])
+
+
 def calculate_signal_win_rate(history):
     required = {"Close", "High", "Low"}
     if history.empty or not required.issubset(history.columns):
@@ -1251,6 +1387,54 @@ def scan_indicator_divergences(df, indicator_column, window=5, min_gap_days=10):
     return filtered
 
 
+def find_single_indicator_divergences(history, lookback_days=90):
+    required = {"High", "Low", "Close", "Volume"}
+    if history.empty or not required.issubset(history.columns):
+        return []
+
+    data, _ = calculate_advanced_indicators_and_signals(history)
+    data["RSI14"] = calculate_rsi(data["Close"], 14)
+    cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=lookback_days)
+    if getattr(data.index, "tz", None) is not None:
+        cutoff = cutoff.tz_localize(data.index.tz)
+
+    indicator_columns = {
+        "RSI": "RSI14",
+        "MACD": "MACD",
+        "CPD": "CPD",
+        "MFI": "MFI14",
+    }
+    latest_price = float(data["Close"].iloc[-1])
+    signals = []
+    for indicator_name, column in indicator_columns.items():
+        for divergence in scan_indicator_divergences(
+            data, column, window=3, min_gap_days=10
+        ):
+            if divergence["date"] < cutoff:
+                continue
+            trigger_close = float(data["Close"].iloc[divergence["index"]])
+            price_change = latest_price - trigger_close
+            direction = (
+                "Bullish"
+                if "Bullish" in divergence["type"]
+                else "Bearish"
+            )
+            signals.append({
+                "Signal Type": direction,
+                "Trigger Date": divergence["date"],
+                "Price": float(divergence["price"]),
+                "Trigger Close": trigger_close,
+                "Latest Price": latest_price,
+                "Change ($)": price_change,
+                "Change (%)": (
+                    price_change / trigger_close * 100 if trigger_close else np.nan
+                ),
+                "Indicator": indicator_name,
+                "Indicator Value": float(divergence["indicator"]),
+            })
+    return sorted(signals, key=lambda signal: signal["Trigger Date"])
+
+
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gains = delta.clip(lower=0)
@@ -1743,12 +1927,25 @@ def open_scanner_signal():
 
 
 if app_view == "Scanner Dashboard":
-    st.title("📡 Watchlist Dual Divergence Scanner")
+    st.title("📡 Watchlist Divergence Scanner")
     st.caption(
-        "Daily RSI(14) and MACD(8,17,9) must confirm at the same price-pivot"
-        " candle within the last 90 calendar days."
+        "Scan saved tickers for confirmed daily divergences. Four-indicator"
+        " confluence aligns MACD, RSI, CPD, and MFI divergence pivots within"
+        " 14 calendar days."
+    )
+    scanner_mode = st.radio(
+        "Scanner mode",
+        [
+            "Dual RSI + MACD",
+            "Individual indicator alerts",
+            "4-indicator confluence",
+        ],
+        horizontal=True,
+        key="scanner_mode",
     )
     scan_rows = []
+    individual_rows = []
+    confluence_rows = []
     scan_errors = []
     total_win_signals = 0
     total_triggered_signals = 0
@@ -1777,6 +1974,18 @@ if app_view == "Scanner Dashboard":
                     **signal,
                     "Signal Win Rate (%)": signal_win_rate,
                 })
+            for signal in find_single_indicator_divergences(ticker_history):
+                individual_rows.append({
+                    "Ticker": ticker_symbol,
+                    **signal,
+                    "Signal Win Rate (%)": signal_win_rate,
+                })
+            for signal in find_four_indicator_confluences(ticker_history):
+                confluence_rows.append({
+                    "Ticker": ticker_symbol,
+                    **signal,
+                    "Signal Win Rate (%)": signal_win_rate,
+                })
         except Exception as error:
             scan_errors.append(f"{ticker_symbol}: {error}")
         if scan_progress:
@@ -1787,7 +1996,14 @@ if app_view == "Scanner Dashboard":
     if scan_progress:
         scan_progress.empty()
 
-    scan_frame = pd.DataFrame(scan_rows)
+    confluence_frame = pd.DataFrame(confluence_rows)
+    scan_frame = pd.DataFrame(
+        confluence_rows
+        if scanner_mode == "4-indicator confluence"
+        else individual_rows
+        if scanner_mode == "Individual indicator alerts"
+        else scan_rows
+    )
     bullish_count = (
         int((scan_frame["Signal Type"] == "Bullish").sum())
         if not scan_frame.empty
@@ -1798,9 +2014,10 @@ if app_view == "Scanner Dashboard":
         if not scan_frame.empty
         else 0
     )
-    metric_bull, metric_bear, metric_total = st.columns(3)
+    metric_bull, metric_bear, metric_confluence, metric_total = st.columns(4)
     metric_bull.metric("🚀 Bullish alerts", bullish_count)
     metric_bear.metric("🚨 Bearish alerts", bearish_count)
+    metric_confluence.metric("4-indicator confluence alerts", len(confluence_frame))
     metric_total.metric("Watchlist tickers", len(st.session_state.watchlist))
     total_system_win_rate = (
         f"{total_win_signals / total_triggered_signals * 100:.1f}%"
@@ -1819,31 +2036,80 @@ if app_view == "Scanner Dashboard":
             st.write("\n".join(scan_errors))
 
     if scan_frame.empty:
-        st.info(
-            "No same-day dual divergence alerts were found in the saved watchlist"
-            " during the last 90 days."
-        )
+        if scanner_mode == "4-indicator confluence":
+            st.info(
+                "No MACD, RSI, CPD, and MFI confluence alerts with pivots aligned"
+                " within 14 calendar days were found in the saved watchlist during"
+                " the last 90 days."
+            )
+        elif scanner_mode == "Individual indicator alerts":
+            st.info(
+                "No RSI, MACD, CPD, or MFI divergence alerts were found in the"
+                " saved watchlist during the last 90 days."
+            )
+        else:
+            st.info(
+                "No same-day dual divergence alerts were found in the saved"
+                " watchlist during the last 90 days."
+            )
     else:
         st.caption(
             "Price is the divergence pivot; performance is measured from the"
             " trigger-day close to the latest available daily price."
         )
-        display_frame = scan_frame[[
-            "Ticker",
-            "Signal Type",
-            "Trigger Date",
-            "Price",
-            "Trigger Close",
-            "Latest Price",
-            "Change ($)",
-            "Change (%)",
-            "RSI",
-            "MACD",
-            "Signal Win Rate (%)",
-        ]].copy()
+        if scanner_mode == "Individual indicator alerts":
+            display_columns = [
+                "Ticker",
+                "Indicator",
+                "Signal Type",
+                "Trigger Date",
+                "Price",
+                "Indicator Value",
+                "Trigger Close",
+                "Latest Price",
+                "Change (%)",
+                "Signal Win Rate (%)",
+            ]
+        else:
+            display_columns = [
+                "Ticker",
+                "Signal Type",
+                "Trigger Date",
+                "Price",
+                "Trigger Close",
+                "Latest Price",
+                "Change ($)",
+                "Change (%)",
+                "RSI",
+                "MACD",
+                "Signal Win Rate (%)",
+            ]
+        if scanner_mode == "4-indicator confluence":
+            display_columns.extend([
+                "CPD",
+                "MFI",
+                "RSI Pivot Date",
+                "MACD Pivot Date",
+                "CPD Pivot Date",
+                "MFI Pivot Date",
+                "Pivot Window (days)",
+                "Confirmed Indicators",
+            ])
+        display_frame = scan_frame[display_columns].copy()
         display_frame["Trigger Date"] = display_frame["Trigger Date"].map(
             lambda trigger_date: pd.Timestamp(trigger_date).strftime("%Y-%m-%d")
         )
+        if scanner_mode == "4-indicator confluence":
+            pivot_date_columns = [
+                "RSI Pivot Date",
+                "MACD Pivot Date",
+                "CPD Pivot Date",
+                "MFI Pivot Date",
+            ]
+            for column in pivot_date_columns:
+                display_frame[column] = display_frame[column].map(
+                    lambda pivot_date: pd.Timestamp(pivot_date).strftime("%Y-%m-%d")
+                )
         st.dataframe(
             display_frame.style.format({
                 "Price": "${:.2f}",
@@ -1853,6 +2119,16 @@ if app_view == "Scanner Dashboard":
                 "Change (%)": "{:+.2f}%",
                 "RSI": "{:.1f}",
                 "MACD": "{:.3f}",
+                "Indicator Value": "{:,.2f}",
+                **(
+                    {
+                        "CPD": "{:,.0f}",
+                        "MFI": "{:.1f}",
+                        "Pivot Window (days)": "{:.0f}",
+                    }
+                    if scanner_mode == "4-indicator confluence"
+                    else {}
+                ),
             }),
             use_container_width=True,
             hide_index=True,
@@ -1946,103 +2222,128 @@ if app_view == "💼 Portfolio & Secondary Allocator":
         portfolio_holdings = portfolio_holdings.reindex(columns=holding_columns)
     st.session_state.portfolio_holdings = portfolio_holdings
 
-    capital_col, cash_col = st.columns(2)
-    with capital_col:
-        total_capital = st.number_input(
-            "Total Capital ($USD)",
-            min_value=0.0,
-            value=100_000.0,
-            step=1_000.0,
-            key="portfolio_total_capital",
-        )
-    with cash_col:
-        cash_balance = st.number_input(
-            "Current Cash Balance / Reserve ($USD)",
-            min_value=0.0,
-            value=100_000.0,
-            step=1_000.0,
-            key="portfolio_cash_balance",
-        )
+    st.session_state.pop("portfolio_total_capital", None)
+    cash_balance = st.number_input(
+        "Current Cash Balance / Reserve ($USD)",
+        min_value=0.0,
+        value=100_000.0,
+        step=1_000.0,
+        key="portfolio_cash_balance",
+    )
 
-    add_col, custom_col, button_col = st.columns([1, 1, 0.7])
-    with add_col:
-        selected_ticker = st.selectbox(
-            "Target ticker",
-            target_tickers,
-            key="portfolio_target_ticker",
-        )
-    with custom_col:
-        custom_ticker = st.text_input(
-            "Or enter any ticker",
-            key="portfolio_custom_ticker",
-            placeholder="e.g. NVDA",
-        )
-    with button_col:
-        st.write("")
-        add_holding = st.button(
-            "Add holding",
+    st.subheader("Add a position")
+    with st.form("portfolio_add_holding_form", clear_on_submit=True):
+        ticker_col, category_col = st.columns(2)
+        with ticker_col:
+            selected_ticker = st.selectbox(
+                "Target ticker",
+                ["Choose a target ticker"] + target_tickers,
+                key="portfolio_target_ticker",
+            )
+            custom_ticker = st.text_input(
+                "Or enter any ticker",
+                key="portfolio_custom_ticker",
+                placeholder="e.g. NVDA",
+            )
+        with category_col:
+            new_category = st.selectbox(
+                "Portfolio category",
+                categories,
+                index=1,
+                key="portfolio_new_holding_category",
+            )
+            new_quantity = st.number_input(
+                "Quantity",
+                min_value=0.0,
+                step=1.0,
+                format="%.4f",
+                key="portfolio_new_holding_quantity",
+            )
+            new_average_cost = st.number_input(
+                "Average cost per share ($)",
+                min_value=0.0,
+                step=0.01,
+                format="$%.2f",
+                help="Leave at $0 to use the latest quoted price as the cost basis.",
+                key="portfolio_new_holding_average_cost",
+            )
+        add_holding = st.form_submit_button(
+            "Add position",
             use_container_width=True,
-            key="portfolio_add_holding",
         )
 
     if add_holding:
-        ticker_to_add = (custom_ticker.strip() or selected_ticker).upper()
+        ticker_to_add = (
+            custom_ticker.strip().upper()
+            or (
+                selected_ticker.upper()
+                if selected_ticker != "Choose a target ticker"
+                else ""
+            )
+        )
         holdings = st.session_state.portfolio_holdings.copy()
         existing_tickers = (
             holdings["Ticker"].astype(str).str.upper().tolist()
             if not holdings.empty
             else []
         )
-        if ticker_to_add not in existing_tickers:
+        if not ticker_to_add:
+            st.warning("Choose a target ticker or enter a ticker symbol.")
+        elif ticker_to_add not in existing_tickers:
             beta, last_price = fetch_portfolio_quote(ticker_to_add)
             new_holding = pd.DataFrame([{
                 "Ticker": ticker_to_add,
-                "Category": "High-Beta Satellite",
+                "Category": new_category,
                 "Beta": beta,
-                "Quantity": 0.0,
-                "Average Cost ($)": last_price,
+                "Quantity": float(new_quantity),
+                "Average Cost ($)": (
+                    float(new_average_cost) if new_average_cost > 0 else last_price
+                ),
                 "Last Price ($)": last_price,
-                "Position Value ($)": 0.0,
+                "Position Value ($)": float(new_quantity) * last_price,
                 "Unrealized P/L ($)": 0.0,
             }])
             st.session_state.portfolio_holdings = pd.concat(
                 [holdings, new_holding], ignore_index=True
             )
             st.rerun()
-        st.info(f"{ticker_to_add} is already in the holdings table.")
+        else:
+            st.info(f"{ticker_to_add} is already in the holdings table.")
 
     base_holdings = st.session_state.portfolio_holdings.copy()
-    edited_holdings = st.data_editor(
-        base_holdings,
-        key="portfolio_holdings_editor_v2",
-        num_rows="dynamic",
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Ticker": st.column_config.TextColumn("Ticker", required=True),
-            "Category": st.column_config.SelectboxColumn(
-                "Category", options=categories, required=True
-            ),
-            "Beta": st.column_config.NumberColumn(
-                "Beta", min_value=-5.0, max_value=10.0, step=0.05, format="%.2f"
-            ),
-            "Quantity": st.column_config.NumberColumn(
-                "Quantity", min_value=0.0, step=1.0, format="%.4f"
-            ),
-            "Average Cost ($)": st.column_config.NumberColumn(
-                "Average Cost ($)", min_value=0.0, step=0.01, format="$%.2f"
-            ),
-            "Last Price ($)": st.column_config.NumberColumn(
-                "Last Price ($)", format="$%.2f", disabled=True
-            ),
-            "Position Value ($)": st.column_config.NumberColumn(
-                "Position Value ($)", format="$%.2f", disabled=True
-            ),
-            "Unrealized P/L ($)": st.column_config.NumberColumn(
-                "Unrealized P/L ($)", format="$%.2f", disabled=True
-            ),
-        },
-    )
+    st.caption("Edit quantities, cost basis, category, or ticker in the expandable table.")
+    with st.expander("Edit holdings", expanded=False):
+        edited_holdings = st.data_editor(
+            base_holdings,
+            key="portfolio_holdings_editor_v2",
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Ticker": st.column_config.TextColumn("Ticker", required=True),
+                "Category": st.column_config.SelectboxColumn(
+                    "Category", options=categories, required=True
+                ),
+                "Beta": st.column_config.NumberColumn(
+                    "Beta", min_value=-5.0, max_value=10.0, step=0.05, format="%.2f"
+                ),
+                "Quantity": st.column_config.NumberColumn(
+                    "Quantity", min_value=0.0, step=1.0, format="%.4f"
+                ),
+                "Average Cost ($)": st.column_config.NumberColumn(
+                    "Average Cost ($)", min_value=0.0, step=0.01, format="$%.2f"
+                ),
+                "Last Price ($)": st.column_config.NumberColumn(
+                    "Last Price ($)", format="$%.2f", disabled=True
+                ),
+                "Position Value ($)": st.column_config.NumberColumn(
+                    "Position Value ($)", format="$%.2f", disabled=True
+                ),
+                "Unrealized P/L ($)": st.column_config.NumberColumn(
+                    "Unrealized P/L ($)", format="$%.2f", disabled=True
+                ),
+            },
+        )
     edited_holdings = edited_holdings.reindex(columns=holding_columns).copy()
     for row_position in range(len(edited_holdings)):
         raw_ticker = edited_holdings.iloc[row_position]["Ticker"]
@@ -2092,7 +2393,28 @@ if app_view == "💼 Portfolio & Secondary Allocator":
     st.session_state.portfolio_holdings = edited_holdings.reset_index(drop=True)
 
     positions_total = float(edited_holdings["Position Value ($)"].sum())
-    allocated_value = positions_total + float(cash_balance)
+    total_capital = positions_total + float(cash_balance)
+    allocated_value = total_capital
+    holdings_display = edited_holdings.copy()
+    holdings_display["Total Percentage (%)"] = (
+        holdings_display["Position Value ($)"] / total_capital * 100
+        if total_capital > 0
+        else 0.0
+    )
+    st.subheader("Portfolio holdings")
+    st.dataframe(
+        holdings_display.style.format({
+            "Beta": "{:.2f}",
+            "Quantity": "{:.4f}",
+            "Average Cost ($)": "${:.2f}",
+            "Last Price ($)": "${:.2f}",
+            "Position Value ($)": "${:,.2f}",
+            "Unrealized P/L ($)": "${:+,.2f}",
+            "Total Percentage (%)": "{:.2f}%",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
     portfolio_beta = (
         float(
             (
@@ -2106,15 +2428,12 @@ if app_view == "💼 Portfolio & Secondary Allocator":
     )
     cash_pct = cash_balance / total_capital * 100 if total_capital > 0 else 0.0
     equity_pct = positions_total / total_capital * 100 if total_capital > 0 else 0.0
-    unallocated_capital = total_capital - allocated_value
 
     portfolio_metric_cols = st.columns(4)
-    portfolio_metric_cols[0].metric("Cash Reserve", f"{cash_pct:.1f}%")
-    portfolio_metric_cols[1].metric("Equity", f"{equity_pct:.1f}%")
-    portfolio_metric_cols[2].metric("Weighted Portfolio Beta", f"{portfolio_beta:.2f}")
-    portfolio_metric_cols[3].metric(
-        "Unallocated Capital", f"${unallocated_capital:,.0f}"
-    )
+    portfolio_metric_cols[0].metric("Total Capital", f"${total_capital:,.2f}")
+    portfolio_metric_cols[1].metric("Cash Reserve", f"{cash_pct:.1f}%")
+    portfolio_metric_cols[2].metric("Invested Positions", f"{equity_pct:.1f}%")
+    portfolio_metric_cols[3].metric("Weighted Portfolio Beta", f"{portfolio_beta:.2f}")
 
     core_value = float(
         edited_holdings.loc[
