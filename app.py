@@ -2262,8 +2262,9 @@ if app_view == "💼 Portfolio & Secondary Allocator":
             new_average_cost = st.number_input(
                 "Average cost per share ($)",
                 min_value=0.0,
+                value=0.0,
                 step=0.01,
-                format="$%.2f",
+                format="%.2f",
                 help="Leave at $0 to use the latest quoted price as the cost basis.",
                 key="portfolio_new_holding_average_cost",
             )
