@@ -618,6 +618,13 @@ def fetch_scanner_history(symbol_str):
     )
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_intraday_history(symbol_str):
+    return yf.Ticker(to_yfinance_symbol(symbol_str)).history(
+        period="60d", interval="1h"
+    )
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_portfolio_quote(symbol):
     try:
@@ -2026,6 +2033,276 @@ def find_volume_poc(df, bins=15):
     return poc_price
 
 
+def find_volume_value_area(df, bins=15, value_area_fraction=0.70):
+    required = {"Close", "Volume"}
+    if df.empty or not required.issubset(df.columns):
+        return None, None
+    prices = pd.to_numeric(df["Close"], errors="coerce").to_numpy(dtype=float)
+    volumes = pd.to_numeric(df["Volume"], errors="coerce").to_numpy(dtype=float)
+    valid = (
+        np.isfinite(prices)
+        & np.isfinite(volumes)
+        & (prices > 0)
+        & (volumes > 0)
+    )
+    if not valid.any():
+        return None, None
+
+    price_bins = max(1, min(int(bins), int(valid.sum())))
+    profile, edges = np.histogram(
+        prices[valid], bins=price_bins, weights=volumes[valid]
+    )
+    total_volume = float(profile.sum())
+    if total_volume <= 0:
+        return None, None
+
+    poc_index = int(np.argmax(profile))
+    included = {poc_index}
+    accumulated_volume = float(profile[poc_index])
+    target_volume = total_volume * max(0.0, min(float(value_area_fraction), 1.0))
+    lower_index = upper_index = poc_index
+    while accumulated_volume < target_volume and (
+        lower_index > 0 or upper_index < len(profile) - 1
+    ):
+        lower_volume = (
+            float(profile[lower_index - 1]) if lower_index > 0 else -1.0
+        )
+        upper_volume = (
+            float(profile[upper_index + 1])
+            if upper_index < len(profile) - 1
+            else -1.0
+        )
+        if upper_volume > lower_volume:
+            upper_index += 1
+            accumulated_volume += upper_volume
+            included.add(upper_index)
+        else:
+            lower_index -= 1
+            accumulated_volume += lower_volume
+            included.add(lower_index)
+
+    return float(edges[min(included)]), float(edges[max(included) + 1])
+
+
+def calculate_atr_risk_metrics(
+    history, support, resistance, current_price, atr_period=14, atr_multiple=1.5
+):
+    if history.empty or not {"High", "Low", "Close"}.issubset(history.columns):
+        return None
+    high = pd.to_numeric(history["High"], errors="coerce")
+    low = pd.to_numeric(history["Low"], errors="coerce")
+    close = pd.to_numeric(history["Close"], errors="coerce")
+    previous_close = close.shift(1)
+    true_range = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = true_range.rolling(atr_period, min_periods=1).mean()
+    atr_value = float(atr.iloc[-1]) if not atr.empty and pd.notna(atr.iloc[-1]) else 0.0
+    current_price = float(current_price or 0.0)
+    support = float(support or 0.0)
+    resistance = float(resistance or 0.0)
+    if atr_value <= 0 or current_price <= 0:
+        return None
+
+    stop_loss = support - atr_value * atr_multiple
+    if stop_loss <= 0 or stop_loss >= current_price:
+        stop_loss = current_price - atr_value * atr_multiple
+    risk_per_share = max(current_price - stop_loss, 0.0)
+    reward_per_share = max(resistance - current_price, 0.0)
+    risk_reward = (
+        reward_per_share / risk_per_share if risk_per_share > 0 else None
+    )
+    middle = close.ewm(span=20, adjust=False).mean()
+    return {
+        "atr": atr_value,
+        "stop_loss": stop_loss,
+        "risk_reward": risk_reward,
+        "channel_middle": middle,
+        "channel_upper": middle + (atr * atr_multiple),
+        "channel_lower": middle - (atr * atr_multiple),
+    }
+
+
+def calculate_timeframe_confluence(daily_history, hourly_history):
+    def timeframe_reading(frame, label):
+        required = {"High", "Low", "Close"}
+        if frame.empty or not required.issubset(frame.columns) or len(frame) < 20:
+            return {
+                "時間週期": label,
+                "趨勢": "資料不足",
+                "動能": "資料不足",
+                "確認分數": 0,
+            }
+        data = frame.copy().sort_index()
+        close = pd.to_numeric(data["Close"], errors="coerce")
+        ema20 = close.ewm(span=20, adjust=False).mean()
+        ema50 = close.ewm(span=50, adjust=False).mean()
+        macd = calculate_synchronized_macd(data)
+        histogram = macd["MACD_Hist"]
+        if pd.isna(close.iloc[-1]) or pd.isna(ema50.iloc[-1]):
+            return {
+                "時間週期": label,
+                "趨勢": "資料不足",
+                "動能": "資料不足",
+                "確認分數": 0,
+            }
+
+        bullish_trend = close.iloc[-1] > ema20.iloc[-1] > ema50.iloc[-1]
+        bearish_trend = close.iloc[-1] < ema20.iloc[-1] < ema50.iloc[-1]
+        trend_score = 1 if bullish_trend else -1 if bearish_trend else 0
+        current_hist = histogram.iloc[-1]
+        prior_hist = histogram.iloc[-2] if len(histogram) >= 2 else np.nan
+        bullish_momentum = (
+            pd.notna(current_hist)
+            and pd.notna(prior_hist)
+            and current_hist > 0
+            and current_hist > prior_hist
+        )
+        bearish_momentum = (
+            pd.notna(current_hist)
+            and pd.notna(prior_hist)
+            and current_hist < 0
+            and current_hist < prior_hist
+        )
+        momentum_score = (
+            1 if bullish_momentum else -1 if bearish_momentum else 0
+        )
+        status_score = trend_score + momentum_score
+        return {
+            "時間週期": label,
+            "趨勢": (
+                "多頭" if trend_score > 0 else "空頭" if trend_score < 0 else "中性"
+            ),
+            "動能": (
+                "增強" if momentum_score > 0 else "轉弱" if momentum_score < 0 else "中性"
+            ),
+            "確認分數": status_score,
+        }
+
+    hourly = (
+        hourly_history.sort_index()
+        if not hourly_history.empty
+        else pd.DataFrame()
+    )
+    four_hour = pd.DataFrame()
+    if not hourly.empty and {"Open", "High", "Low", "Close", "Volume"}.issubset(
+        hourly.columns
+    ):
+        four_hour = hourly.resample("4h").agg({
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        }).dropna(subset=["Open", "High", "Low", "Close"])
+
+    readings = [
+        timeframe_reading(hourly, "1H"),
+        timeframe_reading(four_hour, "4H（1H 重採樣）"),
+        timeframe_reading(daily_history, "日線"),
+    ]
+    valid_scores = [
+        reading["確認分數"]
+        for reading in readings
+        if reading["趨勢"] != "資料不足"
+    ]
+    aggregate = sum(valid_scores)
+    if not valid_scores:
+        label = "資料不足"
+    elif aggregate >= 3:
+        label = "多週期偏多"
+    elif aggregate <= -3:
+        label = "多週期偏空"
+    else:
+        label = "訊號混合"
+    return pd.DataFrame(readings), aggregate, label
+
+
+def find_liquidity_sweeps(history, lookback=20, atr_period=14, max_bars=120):
+    required = {"High", "Low", "Close"}
+    if history.empty or not required.issubset(history.columns):
+        return []
+    data = history.copy().sort_index()
+    high = pd.to_numeric(data["High"], errors="coerce")
+    low = pd.to_numeric(data["Low"], errors="coerce")
+    close = pd.to_numeric(data["Close"], errors="coerce")
+    previous_close = close.shift(1)
+    true_range = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = true_range.rolling(atr_period, min_periods=1).mean()
+    prior_high = high.rolling(lookback, min_periods=lookback).max().shift(1)
+    prior_low = low.rolling(lookback, min_periods=lookback).min().shift(1)
+
+    signals = (
+        data["Signal_Hist_Turn"].fillna(False).astype(bool)
+        if "Signal_Hist_Turn" in data.columns
+        else calculate_synchronized_macd(data)["Signal_Hist_Turn"].fillna(False).astype(bool)
+    )
+    signal_positions = np.flatnonzero(signals.to_numpy())
+    start = max(lookback, len(data) - max_bars)
+    events = []
+    for position in range(start, len(data)):
+        if (
+            pd.isna(prior_high.iloc[position])
+            or pd.isna(prior_low.iloc[position])
+            or pd.isna(atr.iloc[position])
+            or atr.iloc[position] <= 0
+        ):
+            continue
+        upper_level = float(prior_high.iloc[position])
+        lower_level = float(prior_low.iloc[position])
+        bar_high = float(high.iloc[position])
+        bar_low = float(low.iloc[position])
+        bar_close = float(close.iloc[position])
+        threshold = float(atr.iloc[position]) * 0.10
+        direction = None
+        swept_level = None
+        if bar_high > upper_level + threshold and bar_close < upper_level:
+            direction, swept_level = "Bearish high sweep", upper_level
+        elif bar_low < lower_level - threshold and bar_close > lower_level:
+            direction, swept_level = "Bullish low sweep", lower_level
+        if direction is None:
+            continue
+
+        nearby_signals = [
+            int(signal_position)
+            for signal_position in signal_positions
+            if abs(int(signal_position) - position) <= 2
+        ]
+        matched_position = (
+            min(nearby_signals, key=lambda item: abs(item - position))
+            if nearby_signals
+            else None
+        )
+        events.append({
+            "日期": data.index[position],
+            "掃流方向": direction,
+            "被掃關鍵位": swept_level,
+            "收盤價": bar_close,
+            "回收幅度（ATR）": (
+                (bar_high - upper_level) / atr.iloc[position]
+                if direction == "Bearish high sweep"
+                else (lower_level - bar_low) / atr.iloc[position]
+            ),
+            "Signal_Hist_Turn 配對": matched_position is not None,
+            "配對觸發日期": (
+                data.index[matched_position] if matched_position is not None else None
+            ),
+        })
+    return events
+
+
 def generate_technical_narrative(
     symbol,
     curr_price,
@@ -2866,6 +3143,9 @@ if symbol and app_view == "Stock Analysis":
             support_level = curr_price * 0.9 if curr_price else 0.0
             resistance_level = curr_price * 1.1 if curr_price else 0.0
             poc_price = curr_price
+            val_price = vah_price = None
+            atr_risk = None
+            liquidity_sweeps = []
             fib_382 = fib_500 = fib_618 = curr_price
             ma250_valid = False
             rsi_value = np.nan
@@ -4274,6 +4554,14 @@ if symbol and app_view == "Stock Analysis":
                             find_smart_support_resistance(df_hist)
                         )
                         poc_price = find_volume_poc(df_hist)
+                        val_price, vah_price = find_volume_value_area(df_hist)
+                        atr_risk = calculate_atr_risk_metrics(
+                            df_hist,
+                            support_level,
+                            resistance_level,
+                            curr_price,
+                        )
+                        liquidity_sweeps = find_liquidity_sweeps(df_hist)
 
                         h_max = df_hist["High"].max()
                         l_min = df_hist["Low"].min()
@@ -4410,6 +4698,137 @@ if symbol and app_view == "Stock Analysis":
                         k3.metric("籌碼密集區 (POC)", f"${poc_price:.2f}")
                         k4.metric("斐波那契 (61.8%)", f"${fib_618:.2f}")
                         k5.metric("目前最新股價", f"${curr_price:.2f}")
+
+                        k6, k7 = st.columns(2)
+                        k6.metric(
+                            "70% Value Area Low (VAL)",
+                            f"${val_price:.2f}" if val_price is not None else "N/A",
+                        )
+                        k7.metric(
+                            "70% Value Area High (VAH)",
+                            f"${vah_price:.2f}" if vah_price is not None else "N/A",
+                        )
+
+                        st.markdown("#### 多時間週期趨勢與動能共振")
+                        intraday_history = pd.DataFrame()
+                        try:
+                            intraday_history = fetch_intraday_history(symbol)
+                        except Exception as error:
+                            st.warning(
+                                f"ℹ️ 無法取得 1H 多週期資料：{error}。"
+                                "以下仍顯示可用的日線分析。"
+                            )
+                        timeframe_matrix, confluence_score, confluence_label = (
+                            calculate_timeframe_confluence(
+                                df_hist, intraday_history
+                            )
+                        )
+                        available_timeframes = int(
+                            (timeframe_matrix["趨勢"] != "資料不足").sum()
+                        )
+                        max_confluence_score = available_timeframes * 2
+                        st.metric(
+                            "多週期確認",
+                            (
+                                f"{confluence_score:+d} / "
+                                f"{max_confluence_score}"
+                                if max_confluence_score
+                                else "N/A"
+                            ),
+                            delta=confluence_label,
+                        )
+                        st.dataframe(
+                            timeframe_matrix,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        st.markdown("#### ATR 動態停損、波動通道與風險報酬")
+                        if atr_risk:
+                            risk_col1, risk_col2, risk_col3, risk_col4 = (
+                                st.columns(4)
+                            )
+                            risk_col1.metric(
+                                "ATR (14)",
+                                f"${atr_risk['atr']:.2f}",
+                                delta=(
+                                    f"{atr_risk['atr'] / curr_price:.2%} of price"
+                                    if curr_price > 0
+                                    else None
+                                ),
+                            )
+                            risk_col2.metric(
+                                "ATR 支撐動態停損",
+                                f"${atr_risk['stop_loss']:.2f}",
+                                delta=(
+                                    f"{(atr_risk['stop_loss'] / curr_price - 1) * 100:.2f}%"
+                                    if curr_price > 0
+                                    else None
+                                ),
+                                delta_color="inverse",
+                            )
+                            risk_col3.metric(
+                                "壓力位風險報酬比",
+                                (
+                                    f"1 : {atr_risk['risk_reward']:.2f}"
+                                    if atr_risk["risk_reward"] is not None
+                                    else "N/A"
+                                ),
+                                help="以現價為進場參考、ATR 動態停損為風險、波段壓力位為目標估算；未計入滑價與交易成本。",
+                            )
+                            risk_col4.metric(
+                                "ATR 波動通道",
+                                (
+                                    f"${atr_risk['channel_lower'].iloc[-1]:.2f}"
+                                    f" – ${atr_risk['channel_upper'].iloc[-1]:.2f}"
+                                ),
+                                help="EMA(20) ± 1.5 × ATR(14)。",
+                            )
+                            st.caption(
+                                "此為基於歷史波動的參考情境，非個人化投資建議；"
+                                "跳空與流動性不足可能導致實際成交偏離停損價。"
+                            )
+                        else:
+                            st.info("ATR 資料不足，暫無法估算動態停損與風險報酬。")
+
+                        st.markdown("#### 流動性掃單 / Stop-Hunt 偵測")
+                        if liquidity_sweeps:
+                            sweep_table = pd.DataFrame(
+                                liquidity_sweeps[-10:]
+                            ).rename(columns={
+                                "日期": "日期",
+                                "掃流方向": "掃單方向",
+                                "被掃關鍵位": "被掃價位",
+                                "收盤價": "收盤價",
+                                "回收幅度（ATR）": "掃過幅度（ATR）",
+                                "Signal_Hist_Turn 配對": "配對 Signal_Hist_Turn",
+                                "配對觸發日期": "MACD 觸發日期",
+                            })
+                            st.dataframe(
+                                sweep_table.style.format({
+                                    "被掃價位": "${:.2f}",
+                                    "收盤價": "${:.2f}",
+                                    "掃過幅度（ATR）": "{:.2f}",
+                                }),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                            paired_sweeps = sum(
+                                bool(event["Signal_Hist_Turn 配對"])
+                                for event in liquidity_sweeps
+                            )
+                            st.caption(
+                                f"掃描最近 {min(len(df_hist), 120)} 根日線："
+                                "價格刺穿前 20 根 K 線高 / 低點至少 0.1 ATR，"
+                                "且同根 K 線收回關鍵位內；"
+                                f"共 {len(liquidity_sweeps)} 個候選事件，"
+                                f"{paired_sweeps} 個在前後 2 根 K 線內配對 "
+                                "Signal_Hist_Turn。候選訊號需人工確認。"
+                            )
+                        else:
+                            st.info(
+                                "掃描區間內未偵測到符合條件的流動性掃單反轉事件。"
+                            )
 
             # ==========================================
             # 7. 機構級全方位分析報告
@@ -4611,6 +5030,30 @@ if symbol and app_view == "Stock Analysis":
                         col=1,
                     )
 
+                if atr_risk:
+                    fig_k.add_trace(
+                        go.Scatter(
+                            x=df_hist.index,
+                            y=atr_risk["channel_upper"],
+                            name="EMA20 + 1.5 ATR",
+                            line=dict(color="rgba(255, 193, 7, 0.45)", width=1),
+                        ),
+                        row=1,
+                        col=1,
+                    )
+                    fig_k.add_trace(
+                        go.Scatter(
+                            x=df_hist.index,
+                            y=atr_risk["channel_lower"],
+                            name="EMA20 - 1.5 ATR",
+                            line=dict(color="rgba(255, 193, 7, 0.45)", width=1),
+                            fill="tonexty",
+                            fillcolor="rgba(255, 193, 7, 0.06)",
+                        ),
+                        row=1,
+                        col=1,
+                    )
+
                 fig_k.add_hline(
                     y=support_level,
                     line_dash="dash",
@@ -4634,6 +5077,32 @@ if symbol and app_view == "Stock Analysis":
                     row=1,
                     col=1,
                 )
+                if val_price is not None and vah_price is not None:
+                    fig_k.add_hline(
+                        y=val_price,
+                        line_dash="dot",
+                        line_color="#7E57C2",
+                        annotation_text="70% VAL",
+                        row=1,
+                        col=1,
+                    )
+                    fig_k.add_hline(
+                        y=vah_price,
+                        line_dash="dot",
+                        line_color="#7E57C2",
+                        annotation_text="70% VAH",
+                        row=1,
+                        col=1,
+                    )
+                if atr_risk:
+                    fig_k.add_hline(
+                        y=atr_risk["stop_loss"],
+                        line_dash="dash",
+                        line_color="#FF6B6B",
+                        annotation_text="ATR Dynamic Stop",
+                        row=1,
+                        col=1,
+                    )
 
                 entry_mask = df_hist["Signal_Hist_Turn"].fillna(False).astype(bool)
                 exit_mask = df_hist["Signal_Hist_Exit"].fillna(False).astype(bool)
