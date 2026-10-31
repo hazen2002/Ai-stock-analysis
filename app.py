@@ -2085,7 +2085,15 @@ def find_volume_value_area(df, bins=15, value_area_fraction=0.70):
 
 
 def calculate_atr_risk_metrics(
-    history, support, resistance, current_price, atr_period=14, atr_multiple=1.5
+    history,
+    support,
+    resistance,
+    current_price,
+    atr_period=14,
+    atr_multiple=1.5,
+    value_area_low=None,
+    poc_price=None,
+    exhaustion_signal=False,
 ):
     if history.empty or not {"High", "Low", "Close"}.issubset(history.columns):
         return None
@@ -2109,11 +2117,37 @@ def calculate_atr_risk_metrics(
     if atr_value <= 0 or current_price <= 0:
         return None
 
-    stop_loss = support - atr_value * atr_multiple
+    structural_levels = [
+        (name, float(level))
+        for name, level in (
+            ("Support", support),
+            ("VAL", value_area_low),
+            ("POC", poc_price),
+        )
+        if level is not None
+        and pd.notna(level)
+        and np.isfinite(float(level))
+        and 0 < float(level) < current_price
+    ]
+    structural_source, structural_level = (
+        max(structural_levels, key=lambda item: item[1])
+        if structural_levels
+        else ("ATR fallback", current_price)
+    )
+    structural_stop = structural_level - atr_value * atr_multiple
+    stop_loss = structural_stop
     if stop_loss <= 0 or stop_loss >= current_price:
         stop_loss = current_price - atr_value * atr_multiple
+        structural_source = "ATR fallback"
+    trailing_multiple = 1.0 if exhaustion_signal else 2.0
+    trailing_stop = max(
+        stop_loss, current_price - atr_value * trailing_multiple
+    )
     risk_per_share = max(current_price - stop_loss, 0.0)
-    reward_per_share = max(resistance - current_price, 0.0)
+    target_price = resistance if resistance > current_price else None
+    reward_per_share = (
+        max(target_price - current_price, 0.0) if target_price is not None else 0.0
+    )
     risk_reward = (
         reward_per_share / risk_per_share if risk_per_share > 0 else None
     )
@@ -2121,11 +2155,462 @@ def calculate_atr_risk_metrics(
     return {
         "atr": atr_value,
         "stop_loss": stop_loss,
+        "structural_stop": structural_stop,
+        "structural_level": structural_level,
+        "structural_source": structural_source,
+        "trailing_stop": trailing_stop,
+        "trailing_multiple": trailing_multiple,
+        "target_price": target_price,
+        "exhaustion_signal": bool(exhaustion_signal),
         "risk_reward": risk_reward,
         "channel_middle": middle,
         "channel_upper": middle + (atr * atr_multiple),
         "channel_lower": middle - (atr * atr_multiple),
     }
+
+
+def find_chart_pattern_setups(
+    history,
+    support=None,
+    resistance=None,
+    info=None,
+    financials=None,
+    min_confidence=45,
+):
+    required = {"High", "Low", "Close", "Volume"}
+    if history.empty or not required.issubset(history.columns):
+        return []
+    data = (
+        history.sort_index()
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna(subset=list(required))
+        .copy()
+    )
+    if len(data) < 30:
+        return []
+    high = pd.to_numeric(data["High"], errors="coerce")
+    low = pd.to_numeric(data["Low"], errors="coerce")
+    close = pd.to_numeric(data["Close"], errors="coerce")
+    volume = pd.to_numeric(data["Volume"], errors="coerce")
+    last_price = float(close.iloc[-1])
+    patterns = []
+
+    def add_pattern(category, name, confidence, status, evidence):
+        confidence = max(0, min(100, int(round(confidence))))
+        if confidence >= min_confidence:
+            patterns.append({
+                "類別": category,
+                "型態": name,
+                "信心分數": confidence,
+                "狀態": status,
+                "觀察依據": evidence,
+            })
+
+    def breakout_status(direction, level):
+        if direction == "bullish" and last_price > level:
+            return "突破觸發"
+        if direction == "bearish" and last_price < level:
+            return "突破觸發"
+        return "形成中"
+
+    window = 3
+    high_values = high.to_numpy(dtype=float)
+    low_values = low.to_numpy(dtype=float)
+    high_pivots = [
+        index
+        for index in range(window, len(data) - window)
+        if all(
+            high_values[index] >= high_values[index - offset]
+            and high_values[index] >= high_values[index + offset]
+            for offset in range(1, window + 1)
+        )
+    ]
+    low_pivots = [
+        index
+        for index in range(window, len(data) - window)
+        if all(
+            low_values[index] <= low_values[index - offset]
+            and low_values[index] <= low_values[index + offset]
+            for offset in range(1, window + 1)
+        )
+    ]
+    volume_average = volume.rolling(20, min_periods=5).mean()
+    volume_ratio = (
+        float(volume.iloc[-1] / volume_average.iloc[-1])
+        if pd.notna(volume_average.iloc[-1]) and volume_average.iloc[-1] > 0
+        else 1.0
+    )
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    prior_high_20 = float(high.iloc[-21:-1].max()) if len(data) > 21 else float(high.max())
+
+    # Livermore pivotal-point retest and fast shakeout/recovery.
+    pivot_candidates = [
+        float(level)
+        for level in (support, resistance)
+        if level is not None and pd.notna(level) and np.isfinite(float(level))
+    ]
+    pivot_candidates.extend(
+        float(low_values[index]) for index in low_pivots[-8:]
+    )
+    if pivot_candidates and len(data) >= 3:
+        recent = data.iloc[-3:]
+        recovered_pivots = [
+            level
+            for level in pivot_candidates
+            if float(recent["Low"].min()) < level
+            and last_price > level
+        ]
+        if recovered_pivots:
+            level = max(recovered_pivots)
+            surge_ratio = max(volume_ratio, float(volume.iloc[-3:].max() / max(
+                float(volume_average.iloc[-1]) if pd.notna(volume_average.iloc[-1]) else 1.0,
+                1.0,
+            )))
+            confidence = 55 + min(25, max(0, (surge_ratio - 1.0) * 20))
+            add_pattern(
+                "大師型態",
+                "Livermore Pivotal Point / Shakeout",
+                confidence,
+                "突破觸發",
+                f"近 3 根 K 線跌破並收復 ${level:.2f}；量能約 {surge_ratio:.1f}x 均量。",
+            )
+
+    # Minervini VCP: successively smaller peak-to-trough contractions and drying volume.
+    pullbacks = []
+    for peak_position in high_pivots[-8:]:
+        trough_positions = [
+            position
+            for position in low_pivots
+            if peak_position < position <= min(peak_position + 20, len(data) - 1)
+        ]
+        if not trough_positions:
+            continue
+        trough_position = trough_positions[0]
+        peak_value = high_values[peak_position]
+        trough_value = low_values[trough_position]
+        if peak_value > 0 and trough_value < peak_value:
+            pullbacks.append(
+                (trough_position, (peak_value - trough_value) / peak_value)
+            )
+    ordered_pullbacks = [
+        magnitude
+        for _, magnitude in sorted(pullbacks, key=lambda item: item[0])[-3:]
+    ]
+    if len(ordered_pullbacks) >= 2:
+        contracting = all(
+            later < earlier * 0.90
+            for earlier, later in zip(ordered_pullbacks, ordered_pullbacks[1:])
+        )
+        dry_up = (
+            float(volume.iloc[-10:].mean()) < float(volume.iloc[-30:-10].mean())
+            if len(data) >= 30 and float(volume.iloc[-30:-10].mean()) > 0
+            else False
+        )
+        near_base = last_price >= float(ema20.iloc[-1]) * 0.97
+        confidence = (
+            15
+            + (30 if contracting else 0)
+            + (10 if dry_up else 0)
+            + (10 if near_base else 0)
+        )
+        contraction_text = " → ".join(
+            f"{value:.0%}" for value in ordered_pullbacks
+        )
+        add_pattern(
+            "大師型態",
+            "Minervini Volatility Contraction Pattern (VCP)",
+            confidence,
+            breakout_status("bullish", prior_high_20),
+            f"回撤收斂 {contraction_text}"
+            f"；量縮={'是' if dry_up else '否'}；價格位於 EMA20 附近/上方={'是' if near_base else '否'}。",
+        )
+
+    # Lynch growth/earnings line: use reported EPS, PEG and stable annual net-income history.
+    info = info or {}
+    financials = financials if financials is not None else pd.DataFrame()
+    income_row = next(
+        (
+            row
+            for row in ("Net Income", "Net Income Common Stockholders")
+            if row in financials.index
+        ),
+        None,
+    ) if not financials.empty else None
+    income_values = []
+    if income_row:
+        income_values = [
+            float(value)
+            for value in pd.to_numeric(
+                financials.loc[income_row], errors="coerce"
+            ).dropna().tolist()
+            if np.isfinite(float(value))
+        ]
+    income_growth = [
+        current / previous - 1.0
+        for previous, current in zip(income_values[1:], income_values[:-1])
+        if previous > 0 and current > 0
+    ]
+    earnings_growth = info.get("earningsGrowth")
+    if not isinstance(earnings_growth, (int, float, np.number)) or not np.isfinite(float(earnings_growth)):
+        earnings_growth = (
+            (income_values[0] / income_values[-1]) ** (1 / (len(income_values) - 1)) - 1
+            if len(income_values) >= 2 and income_values[-1] > 0 and income_values[0] > 0
+            else None
+        )
+    peg = info.get("pegRatio")
+    if not isinstance(peg, (int, float, np.number)) or not np.isfinite(float(peg)) or float(peg) <= 0:
+        pe = info.get("trailingPE") or info.get("forwardPE")
+        peg = (
+            float(pe) / (float(earnings_growth) * 100)
+            if isinstance(pe, (int, float, np.number))
+            and isinstance(earnings_growth, (int, float, np.number))
+            and float(pe) > 0
+            and float(earnings_growth) > 0
+            else None
+        )
+    eps = info.get("trailingEps")
+    if isinstance(eps, (int, float, np.number)) and np.isfinite(float(eps)) and float(eps) > 0:
+        earnings_line = float(eps) * 15
+        stable_growth = (
+            isinstance(earnings_growth, (int, float, np.number))
+            and float(earnings_growth) >= 0.15
+            and (
+                len(income_growth) < 2
+                or (
+                    all(growth > 0 for growth in income_growth[-3:])
+                    and float(np.std(income_growth[-3:])) <= 0.20
+                )
+            )
+        )
+        peg_below_one = isinstance(peg, (int, float, np.number)) and 0 < float(peg) < 1
+        confidence = 25 + (35 if stable_growth else 0) + (25 if peg_below_one else 0)
+        relative_position = "高於" if last_price >= earnings_line else "低於"
+        confidence += 10 if last_price <= earnings_line * 1.10 else 0
+        add_pattern(
+            "大師型態",
+            "Lynch Growth & Earnings Line",
+            confidence,
+            (
+                "突破觸發"
+                if stable_growth and peg_below_one and last_price >= earnings_line
+                else "形成中"
+            ),
+            f"EPS×15 參考線 ${earnings_line:.2f}；股價{relative_position}參考線；"
+            f"PEG={float(peg):.2f}" if isinstance(peg, (int, float, np.number))
+            else f"EPS×15 參考線 ${earnings_line:.2f}；股價{relative_position}參考線；PEG 資料不足。",
+        )
+
+    # Head-and-shoulders: five alternating pivots with approximate shoulder symmetry.
+    if len(high_pivots) >= 3 and len(low_pivots) >= 2:
+        for shoulder_side in ("top", "bottom"):
+            candidates = sorted(
+                [(i, high_values[i], "H") for i in high_pivots[-12:]]
+                + [(i, low_values[i], "L") for i in low_pivots[-12:]],
+                key=lambda item: item[0],
+            )
+            for offset in range(max(0, len(candidates) - 9), max(0, len(candidates) - 4)):
+                sequence = candidates[offset:offset + 5]
+                expected = ["H", "L", "H", "L", "H"] if shoulder_side == "top" else ["L", "H", "L", "H", "L"]
+                if (
+                    len(sequence) != 5
+                    or [item[2] for item in sequence] != expected
+                    or len(data) - sequence[-1][0] > 20
+                ):
+                    continue
+                left, neck1, head, neck2, right = [item[1] for item in sequence]
+                shoulders = abs(left - right) / max(abs(left), abs(right), 1e-9)
+                neckline = (neck1 + neck2) / 2
+                is_shape = (
+                    head > max(left, right) * 1.03 and shoulders <= 0.08
+                    if shoulder_side == "top"
+                    else head < min(left, right) * 0.97 and shoulders <= 0.08
+                )
+                if is_shape:
+                    name = "Head & Shoulders Top" if shoulder_side == "top" else "Inverse Head & Shoulders"
+                    direction = "bearish" if shoulder_side == "top" else "bullish"
+                    add_pattern(
+                        "反轉型態",
+                        name,
+                        60 + max(0, int((0.08 - shoulders) * 150)),
+                        breakout_status(direction, neckline),
+                        f"頭肩比例差 {shoulders:.1%}；頸線約 ${neckline:.2f}。",
+                    )
+                    break
+
+    # Double/triple tops and bottoms from similarly priced local pivots.
+    for pivot_list, values, is_top in (
+        (high_pivots, high_values, True),
+        (low_pivots, low_values, False),
+    ):
+        recent_pivots = pivot_list[-5:]
+        if len(recent_pivots) < 2:
+            continue
+        for count in (3, 2):
+            if len(recent_pivots) < count:
+                continue
+            group = recent_pivots[-count:]
+            if len(data) - group[-1] > 20:
+                continue
+            prices = [values[position] for position in group]
+            dispersion = (
+                (max(prices) - min(prices)) / max(abs(float(np.mean(prices))), 1e-9)
+            )
+            if dispersion > 0.04:
+                continue
+            if any(
+                later - earlier < 5
+                for earlier, later in zip(group, group[1:])
+            ):
+                continue
+            if is_top:
+                neckline = float(low.iloc[group[0]:group[-1] + 1].min())
+                rejection_depth = (
+                    (float(np.mean(prices)) - neckline)
+                    / max(float(np.mean(prices)), 1e-9)
+                )
+                name = "Triple Top" if count == 3 else "Double Top"
+                direction = "bearish"
+                triggered = last_price < neckline
+            else:
+                neckline = float(high.iloc[group[0]:group[-1] + 1].max())
+                rejection_depth = (
+                    (neckline - float(np.mean(prices)))
+                    / max(float(np.mean(prices)), 1e-9)
+                )
+                name = "Triple Bottom" if count == 3 else "Double Bottom"
+                direction = "bullish"
+                triggered = last_price > neckline
+            if rejection_depth < 0.03:
+                continue
+            add_pattern(
+                "反轉型態",
+                name,
+                55 + max(0, int((0.04 - dispersion) * 250)),
+                "突破觸發" if triggered else "形成中",
+                f"{count} 個波段轉折差異 {dispersion:.1%}；確認位約 ${neckline:.2f}。",
+            )
+            break
+
+    # Rounding bottom and cup/handle measured on a recent 60-bar window.
+    if len(data) >= 60:
+        series = close.iloc[-60:].to_numpy(dtype=float)
+        start_price = float(series[0])
+        end_price = float(series[-1])
+        minimum_position = int(np.argmin(series))
+        minimum_price = float(series[minimum_position])
+        if 15 <= minimum_position <= 44 and min(start_price, end_price) > 0:
+            rim_difference = abs(start_price - end_price) / max(start_price, end_price)
+            recovery = (end_price - minimum_price) / minimum_price
+            if rim_difference <= 0.12 and recovery >= 0.08:
+                add_pattern(
+                    "反轉型態",
+                    "Rounding Bottom",
+                    55 + max(0, int((0.12 - rim_difference) * 150)),
+                    breakout_status("bullish", max(start_price, end_price)),
+                    f"60 根 K 線底部回升 {recovery:.1%}；杯口區約 ${max(start_price, end_price):.2f}。",
+                )
+
+        rim = max(float(np.max(series[:12])), float(np.max(series[-18:-8])))
+        cup_bottom = float(np.min(series[12:-8]))
+        handle_low = float(np.min(series[-8:]))
+        cup_depth = (rim - cup_bottom) / rim if rim > 0 else 0.0
+        handle_depth = (rim - handle_low) / rim if rim > 0 else 0.0
+        if 0.08 <= cup_depth <= 0.35 and 0 < handle_depth < cup_depth * 0.6:
+            add_pattern(
+                "延續型態",
+                "Cup and Handle",
+                55 + (15 if end_price >= rim * 0.95 else 0),
+                breakout_status("bullish", rim),
+                f"杯深 {cup_depth:.1%}；把手回撤 {handle_depth:.1%}；杯口約 ${rim:.2f}。",
+            )
+
+    # Bull/bear flags: impulse leg followed by a short, counter-trend consolidation.
+    if len(data) >= 30:
+        impulse_start = float(close.iloc[-30])
+        impulse_end = float(close.iloc[-11])
+        consolidation = close.iloc[-10:]
+        consolidation_change = (
+            float(consolidation.iloc[-1] / consolidation.iloc[0] - 1)
+            if consolidation.iloc[0] else 0.0
+        )
+        consolidation_range = (
+            float(consolidation.max() - consolidation.min())
+            / max(float(consolidation.mean()), 1e-9)
+        )
+        impulse_return = impulse_end / impulse_start - 1 if impulse_start else 0.0
+        flag_volume_dry = (
+            float(volume.iloc[-10:].mean()) < float(volume.iloc[-30:-10].mean())
+            if float(volume.iloc[-30:-10].mean()) > 0 else False
+        )
+        for bullish in (True, False):
+            valid_flag = (
+                impulse_return >= 0.12 and consolidation_change <= 0.02
+                if bullish
+                else impulse_return <= -0.12 and consolidation_change >= -0.02
+            )
+            if valid_flag:
+                direction = "bullish" if bullish else "bearish"
+                level = float(high.iloc[-11:-1].max()) if bullish else float(low.iloc[-11:-1].min())
+                name = "Bull Flag" if bullish else "Bear Flag"
+                confidence = 50 + (15 if consolidation_range <= 0.10 else 0) + (10 if flag_volume_dry else 0)
+                add_pattern(
+                    "延續型態",
+                    name,
+                    confidence,
+                    breakout_status(direction, level),
+                    f"旗桿漲跌 {impulse_return:.1%}；整理區間 {consolidation_range:.1%}；量縮={'是' if flag_volume_dry else '否'}。",
+                )
+
+    # Rectangular range and triangular convergence from linear slopes of recent highs/lows.
+    range_window = min(30, len(data))
+    range_high = high.iloc[-range_window:]
+    range_low = low.iloc[-range_window:]
+    range_mid = float((range_high.max() + range_low.min()) / 2)
+    range_width = (
+        float(range_high.max() - range_low.min()) / range_mid
+        if range_mid > 0 else 1.0
+    )
+    if range_width <= 0.12:
+        triggered = last_price > float(range_high.iloc[:-1].max()) or last_price < float(range_low.iloc[:-1].min())
+        add_pattern(
+            "延續型態",
+            "Rectangle / Darvas Box",
+            50 + max(0, int((0.12 - range_width) * 200)),
+            "突破觸發" if triggered else "形成中",
+            f"近 {range_window} 根 K 線箱體寬度 {range_width:.1%}；上沿 ${range_high.max():.2f}、下沿 ${range_low.min():.2f}。",
+        )
+
+    if range_window >= 20:
+        x = np.arange(range_window, dtype=float)
+        high_slope = float(np.polyfit(x, range_high.to_numpy(dtype=float), 1)[0])
+        low_slope = float(np.polyfit(x, range_low.to_numpy(dtype=float), 1)[0])
+        price_scale = max(last_price, 1e-9)
+        high_trend = high_slope * range_window / price_scale
+        low_trend = low_slope * range_window / price_scale
+        triangle_specs = [
+            ("Ascending Triangle", high_trend <= 0.025 and low_trend >= 0.025, "bullish", float(range_high.max())),
+            ("Descending Triangle", high_trend <= -0.025 and low_trend >= -0.025, "bearish", float(range_low.min())),
+            ("Symmetrical Triangle", high_trend <= -0.025 and low_trend >= 0.025, "bullish", float(range_high.max())),
+        ]
+        for name, converging, direction, level in triangle_specs:
+            if converging:
+                slope_score = min(20, int((abs(high_trend) + abs(low_trend)) * 150))
+                add_pattern(
+                    "雙向 / 三角型態",
+                    name,
+                    50 + slope_score,
+                    breakout_status(direction, level),
+                    f"近 {range_window} 根高低點趨勢收斂；上沿趨勢 {high_trend:.1%}、下沿趨勢 {low_trend:.1%}。",
+                )
+
+    return sorted(
+        patterns,
+        key=lambda item: (
+            item["類別"],
+            -item["信心分數"],
+            item["型態"],
+        ),
+    )
 
 
 def calculate_timeframe_confluence(daily_history, hourly_history):
@@ -3146,6 +3631,7 @@ if symbol and app_view == "Stock Analysis":
             val_price = vah_price = None
             atr_risk = None
             liquidity_sweeps = []
+            pattern_setups = []
             fib_382 = fib_500 = fib_618 = curr_price
             ma250_valid = False
             rsi_value = np.nan
@@ -4555,11 +5041,42 @@ if symbol and app_view == "Stock Analysis":
                         )
                         poc_price = find_volume_poc(df_hist)
                         val_price, vah_price = find_volume_value_area(df_hist)
+                        latest_exhaustion_signal = bool(
+                            df_hist["Signal_Hist_Exit"].iloc[-1]
+                            if "Signal_Hist_Exit" in df_hist.columns
+                            and pd.notna(df_hist["Signal_Hist_Exit"].iloc[-1])
+                            else False
+                        )
+                        latest_rsi = (
+                            float(df_hist["RSI14"].iloc[-1])
+                            if "RSI14" in df_hist.columns
+                            and pd.notna(df_hist["RSI14"].iloc[-1])
+                            else None
+                        )
+                        near_resistance = (
+                            resistance_level > curr_price > 0
+                            and (resistance_level - curr_price) / curr_price <= 0.02
+                        )
+                        exhaustion_signal = bool(
+                            latest_exhaustion_signal
+                            or (latest_rsi is not None and latest_rsi >= 70)
+                            or near_resistance
+                        )
                         atr_risk = calculate_atr_risk_metrics(
                             df_hist,
                             support_level,
                             resistance_level,
                             curr_price,
+                            value_area_low=val_price,
+                            poc_price=poc_price,
+                            exhaustion_signal=exhaustion_signal,
+                        )
+                        pattern_setups = find_chart_pattern_setups(
+                            df_hist,
+                            support=support_level,
+                            resistance=resistance_level,
+                            info=info,
+                            financials=fin,
                         )
                         liquidity_sweeps = find_liquidity_sweeps(df_hist)
 
@@ -4745,9 +5262,7 @@ if symbol and app_view == "Stock Analysis":
 
                         st.markdown("#### ATR 動態停損、波動通道與風險報酬")
                         if atr_risk:
-                            risk_col1, risk_col2, risk_col3, risk_col4 = (
-                                st.columns(4)
-                            )
+                            risk_col1, risk_col2, risk_col3, risk_col4, risk_col5, risk_col6 = st.columns(6)
                             risk_col1.metric(
                                 "ATR (14)",
                                 f"${atr_risk['atr']:.2f}",
@@ -4758,7 +5273,7 @@ if symbol and app_view == "Stock Analysis":
                                 ),
                             )
                             risk_col2.metric(
-                                "ATR 支撐動態停損",
+                                f"結構停損（{atr_risk['structural_source']}）",
                                 f"${atr_risk['stop_loss']:.2f}",
                                 delta=(
                                     f"{(atr_risk['stop_loss'] / curr_price - 1) * 100:.2f}%"
@@ -4766,23 +5281,56 @@ if symbol and app_view == "Stock Analysis":
                                     else None
                                 ),
                                 delta_color="inverse",
+                                help=(
+                                    f"選用最近且低於現價的結構位 "
+                                    f"${atr_risk['structural_level']:.2f}，"
+                                    f"再扣除 {1.5:.1f} ATR 緩衝。"
+                                ),
                             )
                             risk_col3.metric(
-                                "壓力位風險報酬比",
+                                "結構停利目標",
+                                (
+                                    f"${atr_risk['target_price']:.2f}"
+                                    if atr_risk["target_price"] is not None
+                                    else "N/A"
+                                ),
+                                delta=(
+                                    "波段壓力位"
+                                    if atr_risk["target_price"] is not None
+                                    else "上方阻力位未確認"
+                                ),
+                            )
+                            risk_col4.metric(
+                                "風險報酬比",
                                 (
                                     f"1 : {atr_risk['risk_reward']:.2f}"
                                     if atr_risk["risk_reward"] is not None
                                     else "N/A"
                                 ),
-                                help="以現價為進場參考、ATR 動態停損為風險、波段壓力位為目標估算；未計入滑價與交易成本。",
+                                help="以現價為進場參考、結構停損為風險、上方波段壓力為目標估算；未計入滑價與交易成本。",
                             )
-                            risk_col4.metric(
+                            risk_col5.metric(
+                                "結構追蹤停損",
+                                f"${atr_risk['trailing_stop']:.2f}",
+                                delta=(
+                                    "耗竭訊號收緊"
+                                    if atr_risk["exhaustion_signal"]
+                                    else "2 × ATR 追蹤"
+                                ),
+                                help="以結構停損為底線；一般使用現價 - 2 ATR，偵測 MACD 動能退出、RSI 超買或接近阻力時收緊至 1 ATR。",
+                            )
+                            risk_col6.metric(
                                 "ATR 波動通道",
                                 (
                                     f"${atr_risk['channel_lower'].iloc[-1]:.2f}"
                                     f" – ${atr_risk['channel_upper'].iloc[-1]:.2f}"
                                 ),
                                 help="EMA(20) ± 1.5 × ATR(14)。",
+                            )
+                            st.caption(
+                                f"結構參考位 ${atr_risk['structural_level']:.2f}"
+                                f"（{atr_risk['structural_source']}）− 1.5 ATR；"
+                                f"耗竭訊號：{'是' if atr_risk['exhaustion_signal'] else '否'}。"
                             )
                             st.caption(
                                 "此為基於歷史波動的參考情境，非個人化投資建議；"
@@ -4828,6 +5376,34 @@ if symbol and app_view == "Stock Analysis":
                         else:
                             st.info(
                                 "掃描區間內未偵測到符合條件的流動性掃單反轉事件。"
+                            )
+
+                        st.markdown("#### Master & Technical Patterns Scanner")
+                        if pattern_setups:
+                            pattern_table = pd.DataFrame(pattern_setups)
+                            st.dataframe(
+                                pattern_table.style.format({
+                                    "信心分數": "{:.0f}%",
+                                }),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                            forming_count = sum(
+                                item["狀態"] == "形成中"
+                                for item in pattern_setups
+                            )
+                            triggered_count = sum(
+                                item["狀態"] == "突破觸發"
+                                for item in pattern_setups
+                            )
+                            st.caption(
+                                f"掃描到 {len(pattern_setups)} 個符合最低信心門檻的型態；"
+                                f"{triggered_count} 個突破觸發、{forming_count} 個形成中。"
+                                "型態辨識為 OHLCV 啟發式篩選，需結合基本面及人工覆核。"
+                            )
+                        else:
+                            st.info(
+                                "目前資料中沒有信心分數達 45% 的大師型態或經典圖表型態。"
                             )
 
             # ==========================================
@@ -5103,6 +5679,23 @@ if symbol and app_view == "Stock Analysis":
                         row=1,
                         col=1,
                     )
+                    fig_k.add_hline(
+                        y=atr_risk["trailing_stop"],
+                        line_dash="dot",
+                        line_color="#FF8A65",
+                        annotation_text="Structural Trailing Stop",
+                        row=1,
+                        col=1,
+                    )
+                    if atr_risk["target_price"] is not None:
+                        fig_k.add_hline(
+                            y=atr_risk["target_price"],
+                            line_dash="dot",
+                            line_color="#66BB6A",
+                            annotation_text="Resistance Target",
+                            row=1,
+                            col=1,
+                        )
 
                 entry_mask = df_hist["Signal_Hist_Turn"].fillna(False).astype(bool)
                 exit_mask = df_hist["Signal_Hist_Exit"].fillna(False).astype(bool)
