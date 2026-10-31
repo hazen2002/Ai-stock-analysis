@@ -1276,6 +1276,234 @@ def calculate_fcfe_dcf(
     }
 
 
+def _finite_float(value, default=0.0):
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return default
+    return numeric_value if np.isfinite(numeric_value) else default
+
+
+def calculate_traditional_fcff_dcf(
+    current_stock_price,
+    base_fcf,
+    fcf_history,
+    discount_rate,
+    net_debt,
+    total_shares_outstanding,
+    forecast_period=5,
+    terminal_growth_rate=0.0225,
+):
+    base_fcf = max(_finite_float(base_fcf), 0.0)
+    shares = max(_finite_float(total_shares_outstanding), 0.0)
+    years = max(1, int(forecast_period))
+    discount = _finite_float(discount_rate)
+    if discount > 1.0:
+        discount /= 100.0
+    discount = max(0.01, min(discount, 0.50))
+    terminal_growth = max(0.0, min(_finite_float(terminal_growth_rate, 0.0225), 0.04))
+    if discount <= terminal_growth:
+        discount = min(0.50, terminal_growth + 0.01)
+
+    historical_fcf = [
+        _finite_float(value, np.nan) for value in (fcf_history or [])
+    ]
+    historical_growth = [
+        current / previous - 1.0
+        for previous, current in zip(historical_fcf, historical_fcf[1:])
+        if np.isfinite(previous) and np.isfinite(current) and previous > 0 and current > 0
+    ]
+    initial_growth = (
+        float(np.median(historical_growth)) if historical_growth else terminal_growth
+    )
+    initial_growth = max(-0.10, min(initial_growth, 0.15))
+
+    projections = []
+    present_value_total = 0.0
+    projected_fcf = base_fcf
+    for year in range(1, years + 1):
+        fade = (year - 1) / max(years - 1, 1)
+        growth = initial_growth + (terminal_growth - initial_growth) * fade
+        projected_fcf *= 1.0 + growth
+        present_value = projected_fcf / ((1.0 + discount) ** year)
+        present_value_total += present_value
+        projections.append({
+            "Year": year,
+            "Growth Rate": growth,
+            "FCFF": projected_fcf,
+            "Present Value": present_value,
+        })
+
+    final_fcf = projections[-1]["FCFF"] if projections else 0.0
+    terminal_value = (
+        final_fcf * (1.0 + terminal_growth) / (discount - terminal_growth)
+        if final_fcf > 0 and discount > terminal_growth
+        else 0.0
+    )
+    present_value_terminal = terminal_value / ((1.0 + discount) ** years)
+    enterprise_value = present_value_total + present_value_terminal
+    equity_value = max(0.0, enterprise_value - _finite_float(net_debt))
+    value_per_share = equity_value / shares if shares > 0 else 0.0
+    valuation_difference = (
+        ((_finite_float(current_stock_price) - value_per_share) / value_per_share) * 100
+        if value_per_share > 0
+        else 0.0
+    )
+    status = "Overvalued" if valuation_difference >= 0 else "Undervalued"
+    return {
+        "dcfValuePerShare": value_per_share,
+        "valuationStatus": f"{status} by {abs(valuation_difference):.2f}%",
+        "yearlyProjections": projections,
+        "terminalValue": terminal_value,
+        "presentValueTerminal": present_value_terminal,
+        "totalPresentValue": enterprise_value,
+        "equityValue": equity_value,
+        "discountRate": discount,
+        "terminalGrowthRate": terminal_growth,
+        "historicalGrowthRate": initial_growth,
+    }
+
+
+def estimate_roa_history(financials, balance_sheet):
+    if financials.empty or balance_sheet.empty:
+        return []
+
+    net_income_row = next(
+        (
+            row
+            for row in ["Net Income", "Net Income Common Stockholders"]
+            if row in financials.index
+        ),
+        None,
+    )
+    assets_row = next(
+        (row for row in ["Total Assets"] if row in balance_sheet.index),
+        None,
+    )
+    if net_income_row is None or assets_row is None:
+        return []
+
+    balance_sheet_columns = {str(column): column for column in balance_sheet.columns}
+    roa_values = []
+    for column in financials.columns:
+        matching_column = balance_sheet_columns.get(str(column))
+        if matching_column is None:
+            continue
+        net_income = pd.to_numeric(
+            financials.at[net_income_row, column], errors="coerce"
+        )
+        total_assets = pd.to_numeric(
+            balance_sheet.at[assets_row, matching_column], errors="coerce"
+        )
+        if (
+            pd.notna(net_income)
+            and pd.notna(total_assets)
+            and float(total_assets) > 0
+        ):
+            roa_values.append(float(net_income) / float(total_assets))
+    return roa_values
+
+
+def estimate_industry_roa_benchmark(industry, sector):
+    industry_text = (industry or "").lower()
+    sector_text = (sector or "").lower()
+    if "bank" in industry_text or "bank" in sector_text:
+        return 0.012
+    if "financial" in industry_text or "financial" in sector_text:
+        return 0.015
+    if "semiconductor" in industry_text:
+        return 0.07
+    if "software" in industry_text or "cloud" in industry_text:
+        return 0.07
+    if "hardware" in industry_text or "electronics" in industry_text:
+        return 0.06
+    if "utility" in industry_text or "utilities" in sector_text:
+        return 0.035
+    if any(term in industry_text for term in ["energy", "oil", "gas"]):
+        return 0.05
+    return 0.05
+
+
+def calculate_roa_adjusted_dcf(
+    current_stock_price,
+    base_revenue,
+    revenue_growth_rate,
+    target_net_margin,
+    cash_flow_conversion_rate,
+    forecast_period,
+    discount_rate,
+    exit_multiple,
+    total_shares_outstanding,
+    terminal_growth_rate,
+    terminal_value_eligible,
+    roa,
+    industry_roa_benchmark,
+    historical_roa,
+):
+    benchmark = max(_finite_float(industry_roa_benchmark, 0.05), 0.005)
+    roa_numeric = _finite_float(roa, np.nan)
+    valid_roa = roa_numeric if np.isfinite(roa_numeric) else None
+    history = [
+        value
+        for value in (_finite_float(item, np.nan) for item in (historical_roa or []))
+        if np.isfinite(value)
+    ][-5:]
+    if valid_roa is None:
+        quality_delta = 0.0
+        cash_flow_multiplier = 1.0
+        stability_factor = 1.0
+    else:
+        average_roa = float(np.mean(history)) if history else valid_roa
+        roa_volatility = (
+            float(np.std(history)) / max(abs(average_roa), benchmark)
+            if len(history) >= 2
+            else 0.0
+        )
+        stability_factor = max(0.70, 1.0 - min(roa_volatility, 1.0) * 0.30)
+        relative_roa = valid_roa / benchmark
+        quality_delta = max(
+            -0.02,
+            min((relative_roa - 1.0) * 0.015 * stability_factor, 0.02),
+        )
+        cash_flow_multiplier = max(
+            0.85,
+            min(1.0 + (relative_roa - 1.0) * 0.15 * stability_factor, 1.15),
+        )
+
+    adjusted_discount_rate = max(
+        0.01, min(_finite_float(discount_rate, 0.08) - quality_delta, 0.50)
+    )
+    adjusted_terminal_growth = max(
+        0.0,
+        min(
+            _finite_float(terminal_growth_rate) + quality_delta * 0.25,
+            0.03,
+            adjusted_discount_rate - 0.01,
+        ),
+    )
+    result = calculate_fcfe_dcf(
+        current_stock_price,
+        base_revenue,
+        revenue_growth_rate,
+        target_net_margin,
+        cash_flow_conversion_rate * cash_flow_multiplier,
+        forecast_period,
+        adjusted_discount_rate,
+        exit_multiple * cash_flow_multiplier,
+        total_shares_outstanding,
+        adjusted_terminal_growth,
+        terminal_value_eligible,
+    )
+    result.update({
+        "roa": valid_roa,
+        "industryRoaBenchmark": benchmark,
+        "roaStabilityFactor": stability_factor,
+        "cashFlowMultiplier": cash_flow_multiplier,
+        "qualityAdjustedDiscountRate": adjusted_discount_rate,
+    })
+    return result
+
+
 def classify_trend_status(df):
     if df.empty or len(df) < 55:
         return "資料不足", "無法計算趨勢"
@@ -2865,10 +3093,10 @@ if symbol and app_view == "Stock Analysis":
             )
 
             # ==========================================
-            # 3. DCF 現金流折現估值模型 (Pragmatic 5-Year FCFF Model)
+            # 3. 三種 DCF 現金流折現估值模型
             # ==========================================
             st.write("---")
-            st.subheader("💰 3. DCF 現金流折現估值模型 (Pragmatic 5-Year FCFF Model)")
+            st.subheader("💰 3. 三種 DCF 現金流折現估值模型 (Comparative DCF)")
 
             rf_rate = get_risk_free_rate()
             beta = info.get("beta", 1.0)
@@ -3375,6 +3603,51 @@ if symbol and app_view == "Stock Analysis":
                 pess_val = blend_valuation(pess_dcf_val)
                 opt_val = blend_valuation(opt_dcf_val)
 
+                traditional_dcf_result = calculate_traditional_fcff_dcf(
+                    curr_price,
+                    base_fcf,
+                    chronological_fcf,
+                    discount_rate,
+                    net_debt,
+                    shares_out,
+                    forecast_period=5,
+                    terminal_growth_rate=0.0225,
+                )
+                roa_raw = info.get("returnOnAssets")
+                roa_value = (
+                    float(roa_raw)
+                    if isinstance(roa_raw, (int, float, np.number))
+                    and pd.notna(roa_raw)
+                    and np.isfinite(float(roa_raw))
+                    else None
+                )
+                industry_roa_benchmark = estimate_industry_roa_benchmark(
+                    raw_industry, raw_sector
+                )
+                historical_roa = estimate_roa_history(fin, bs)
+                roa_adjusted_result = calculate_roa_adjusted_dcf(
+                    curr_price,
+                    annual_revenue,
+                    base_growth_rate,
+                    target_net_margin,
+                    cash_flow_conversion_rate,
+                    forecast_period,
+                    discount_rate,
+                    exit_multiple,
+                    shares_out,
+                    base_term_g,
+                    stable_positive_fcf,
+                    roa_value,
+                    industry_roa_benchmark,
+                    historical_roa,
+                )
+                traditional_dcf_value = traditional_dcf_result[
+                    "dcfValuePerShare"
+                ]
+                roa_adjusted_dcf_value = roa_adjusted_result[
+                    "dcfValuePerShare"
+                ]
+
                 base_fcfs = [
                     row["FCFE"] for row in base_fcfe_result["yearlyProjections"][:5]
                 ]
@@ -3386,6 +3659,79 @@ if symbol and app_view == "Stock Analysis":
                 base_pv_tv = base_fcfe_result["presentValueTerminal"]
                 base_ev = base_fcfe_result["totalPresentValue"]
                 base_eq = base_ev
+
+                st.markdown("#### 三種方法估值比較")
+                method_columns = st.columns(3)
+                method_columns[0].metric(
+                    "Approach #1｜傳統 FCFF",
+                    f"${traditional_dcf_value:.2f}",
+                    help="5 年歷史 FCF 成長率淡出預測，WACC 折現並使用 2.25% Gordon 永續成長率；股權價值扣除淨債務。",
+                )
+                method_columns[1].metric(
+                    "Approach #2｜成長加權（現行）",
+                    f"${base_val:.2f}",
+                    help="保留原有 FCF、淨利與營收加權成長模型及原有 DCF/同業倍數混合估值。",
+                )
+                method_columns[2].metric(
+                    "Approach #3｜ROA 品質調整",
+                    f"${roa_adjusted_dcf_value:.2f}",
+                    help=(
+                        f"ROA {roa_value * 100:.2f}% vs. 同業基準 "
+                        f"{industry_roa_benchmark * 100:.2f}%；依 ROA 與穩定度調整現金流轉換率、"
+                        f"終值成長及折現率。"
+                        if roa_value is not None
+                        else "缺少有效 ROA 資料；以中性品質調整呈現原始成長加權 DCF。"
+                    ),
+                )
+                valuation_comparison = pd.DataFrame([
+                    {
+                        "DCF 方法": "Approach #1 傳統 FCFF（5 年）",
+                        "每股估值": traditional_dcf_value,
+                        "折現率": traditional_dcf_result["discountRate"],
+                        "終值成長率": traditional_dcf_result["terminalGrowthRate"],
+                        "ROA": None,
+                        "同業 ROA 基準": None,
+                        "現金流調整倍數": 1.0,
+                    },
+                    {
+                        "DCF 方法": "Approach #2 成長加權（現行）",
+                        "每股估值": base_val,
+                        "折現率": discount_rate,
+                        "終值成長率": base_term_g,
+                        "ROA": roa_value,
+                        "同業 ROA 基準": industry_roa_benchmark,
+                        "現金流調整倍數": 1.0,
+                    },
+                    {
+                        "DCF 方法": "Approach #3 ROA 品質調整",
+                        "每股估值": roa_adjusted_dcf_value,
+                        "折現率": roa_adjusted_result[
+                            "qualityAdjustedDiscountRate"
+                        ],
+                        "終值成長率": roa_adjusted_result["terminalGrowthRate"],
+                        "ROA": roa_value,
+                        "同業 ROA 基準": industry_roa_benchmark,
+                        "現金流調整倍數": roa_adjusted_result[
+                            "cashFlowMultiplier"
+                        ],
+                    },
+                ])
+                st.dataframe(
+                    valuation_comparison.style.format({
+                        "每股估值": "${:.2f}",
+                        "折現率": "{:.2%}",
+                        "終值成長率": "{:.2%}",
+                        "ROA": "{:.2%}",
+                        "同業 ROA 基準": "{:.2%}",
+                        "現金流調整倍數": "{:.2f}x",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.caption(
+                    "Approach #2 保留既有情境估值、估值混合、基本面評分與下方計算明細；"
+                    "Approach #1 為 FCFF/WACC 企業價值模型，Approach #3 為獨立的 ROA 調整 FCFE 模型。"
+                )
 
                 pess_discount = discount_rate + 0.01
                 opt_discount = max(discount_rate - 0.008, 0.05)
