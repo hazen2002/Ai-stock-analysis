@@ -1861,6 +1861,8 @@ def fetch_options_analysis(symbol_str, current_price):
             "impliedVolatility",
             "lastPrice",
             "strike",
+            "gamma",
+            "delta",
         ]:
             if column not in options:
                 options[column] = 0.0
@@ -1929,6 +1931,127 @@ def fetch_options_analysis(symbol_str, current_price):
             else np.nan
         )
 
+        options["Days to Expiry"] = (
+            pd.to_datetime(options["Expiry"]) - today
+        ).dt.days.clip(lower=0)
+        term_rows = []
+        for expiry, expiry_options in options.groupby("Expiry", sort=True):
+            expiry_options = expiry_options.copy()
+            expiry_options["Moneyness Distance"] = (
+                expiry_options["strike"] - float(current_price)
+            ).abs()
+            atm_options = expiry_options.loc[
+                expiry_options["Moneyness Distance"]
+                <= max(float(current_price) * 0.05, 1.0)
+            ]
+            atm_calls = atm_options.loc[
+                atm_options["Option Type"] == "Call", "impliedVolatility"
+            ].replace(0, np.nan)
+            atm_puts = atm_options.loc[
+                atm_options["Option Type"] == "Put", "impliedVolatility"
+            ].replace(0, np.nan)
+            call_atm_iv = float(atm_calls.median()) if not atm_calls.dropna().empty else np.nan
+            put_atm_iv = float(atm_puts.median()) if not atm_puts.dropna().empty else np.nan
+            otm_put_iv_values = expiry_options.loc[
+                (expiry_options["Option Type"] == "Put")
+                & (expiry_options["strike"] <= float(current_price) * 0.95),
+                "impliedVolatility",
+            ].replace(0, np.nan).dropna()
+            otm_call_iv_values = expiry_options.loc[
+                (expiry_options["Option Type"] == "Call")
+                & (expiry_options["strike"] >= float(current_price) * 1.05),
+                "impliedVolatility",
+            ].replace(0, np.nan).dropna()
+            otm_put_iv = (
+                float(otm_put_iv_values.median())
+                if not otm_put_iv_values.empty
+                else np.nan
+            )
+            otm_call_iv = (
+                float(otm_call_iv_values.median())
+                if not otm_call_iv_values.empty
+                else np.nan
+            )
+            available_atm_ivs = [
+                value for value in (call_atm_iv, put_atm_iv) if pd.notna(value)
+            ]
+            term_rows.append({
+                "到期日": expiry,
+                "剩餘天數": int(expiry_options["Days to Expiry"].iloc[0]),
+                "ATM Call IV": call_atm_iv,
+                "ATM Put IV": put_atm_iv,
+                "Put-Call Skew": (
+                    put_atm_iv - call_atm_iv
+                    if pd.notna(put_atm_iv) and pd.notna(call_atm_iv)
+                    else np.nan
+                ),
+                "OTM Put IV": otm_put_iv,
+                "OTM Call IV": otm_call_iv,
+                "25D Proxy Skew": (
+                    otm_put_iv - otm_call_iv
+                    if pd.notna(otm_put_iv) and pd.notna(otm_call_iv)
+                    else np.nan
+                ),
+                "ATM IV": (
+                    float(np.mean(available_atm_ivs))
+                    if available_atm_ivs
+                    else np.nan
+                ),
+            })
+        iv_term_structure = pd.DataFrame(term_rows)
+        if not iv_term_structure.empty:
+            iv_term_structure = iv_term_structure.sort_values("剩餘天數")
+
+        gamma_rows = []
+        has_gamma_data = bool(
+            (options["gamma"] > 0).any() and (options["openInterest"] > 0).any()
+        )
+        if has_gamma_data and float(current_price) > 0:
+            # Approximate 1% spot-move GEX; calls positive and puts negative is
+            # a convention, not observable dealer positioning.
+            options["Approx GEX"] = (
+                options["gamma"]
+                * options["openInterest"]
+                * 100
+                * float(current_price) ** 2
+                * 0.01
+                * np.where(options["Option Type"] == "Call", 1.0, -1.0)
+            )
+            gamma_grouped = (
+                options.groupby(["strike", "Option Type"])["Approx GEX"]
+                .sum()
+                .unstack(fill_value=0.0)
+                .reindex(columns=["Call", "Put"], fill_value=0.0)
+                .rename(columns={"Call": "Call GEX", "Put": "Put GEX"})
+                .reset_index()
+            )
+            gamma_grouped["Net GEX"] = gamma_grouped["Call GEX"] + gamma_grouped["Put GEX"]
+            gamma_grouped["距現價"] = (
+                gamma_grouped["strike"] - float(current_price)
+            ).abs()
+            strongest_gamma_level = (
+                float(
+                    gamma_grouped.loc[
+                        gamma_grouped["Net GEX"].abs().idxmax(), "strike"
+                    ]
+                )
+                if not gamma_grouped.empty
+                else np.nan
+            )
+            gamma_near_spot = gamma_grouped.sort_values(
+                ["距現價", "Net GEX"], ascending=[True, False]
+            ).head(15)
+            gamma_rows = gamma_near_spot.sort_values("strike").rename(
+                columns={"strike": "履約價"}
+            ).drop(columns=["距現價"]).to_dict("records")
+        net_gex = (
+            float(options["Approx GEX"].sum())
+            if has_gamma_data and "Approx GEX" in options
+            else np.nan
+        )
+        if not gamma_rows:
+            strongest_gamma_level = np.nan
+
         unusual = options[
             (options["volume"] > 2.5 * options["openInterest"])
             & (options["volume"] > 1000)
@@ -1962,6 +2085,10 @@ def fetch_options_analysis(symbol_str, current_price):
             "pcr_oi": pcr_oi,
             "max_pain": max_pain,
             "iv_summary": iv_summary,
+            "iv_term_structure": iv_term_structure,
+            "gamma_exposure": pd.DataFrame(gamma_rows),
+            "net_gex": net_gex,
+            "strongest_gamma_level": strongest_gamma_level,
             "unusual": unusual[display_columns],
             "call_volume": call_volume,
             "put_volume": put_volume,
@@ -1985,6 +2112,56 @@ def interpret_options_flow(options_summary):
     if put_value > call_value * 1.5:
         return "異常流量以 Put 名目金額為主，較接近下行避險或偏空布局，需觀察 Put IV Skew 是否同步走高。"
     return "Call 與 Put 異常流量相對均衡，可能包含跨式策略或波動率交易，暫不宜解讀為單方向押注。"
+
+
+def classify_options_flow(options_summary, current_price):
+    unusual = options_summary.get("unusual", pd.DataFrame())
+    if unusual.empty or "Strike Price" not in unusual:
+        return []
+    classifications = []
+    for _, contract in unusual.iterrows():
+        option_type = contract.get("Option Type")
+        strike = float(contract.get("Strike Price", 0.0) or 0.0)
+        iv = contract.get("Implied Volatility", np.nan)
+        volume = float(contract.get("Volume", 0.0) or 0.0)
+        oi = float(contract.get("Open Interest", 0.0) or 0.0)
+        if current_price <= 0 or strike <= 0:
+            continue
+        moneyness = strike / float(current_price) - 1.0
+        if option_type == "Put" and moneyness <= -0.05:
+            bucket = "OTM Put 異常流量（可能賣 Put / 下行避險）"
+            interpretation = (
+                "若成交發生在 Bid 附近，可能是 Bullish Put Writing；"
+                "僅憑公開鏈資料無法確認交易方向。"
+            )
+        elif option_type == "Call" and moneyness >= 0.05:
+            bucket = "Speculative OTM Call Sweep 候選"
+            interpretation = (
+                "遠價外 Call 且 Volume/OI 偏高，可能為方向性投機買盤；"
+                "需用逐筆成交價與 Bid/Ask 確認是否為主動買入。"
+            )
+        elif option_type == "Call" and moneyness <= -0.05:
+            bucket = "ITM Call 流量（可能替代持股 / 空頭回補）"
+            interpretation = "深價內 Call 可能具替代持股特徵，不能僅依合約類型判定看多。"
+        elif option_type == "Put" and moneyness >= 0.05:
+            bucket = "OTM Put 買權候選（下行避險）"
+            interpretation = "價外 Put 活躍可能反映下行避險，也可能是賣方部位，方向需核對成交價。"
+        else:
+            bucket = f"ATM {option_type} 高成交量"
+            interpretation = "近平值活躍合約方向不明，宜結合 IV 變化與成交價判讀。"
+        if pd.notna(iv) and float(iv) >= 0.80 and option_type == "Call":
+            interpretation += " 隱含波動率偏高，注意高波動溢價及 Theta 衰減。"
+        classifications.append({
+            "分類": bucket,
+            "履約價": strike,
+            "到期日": contract.get("Expiry", ""),
+            "成交量": volume,
+            "Volume/OI": (
+                volume / oi if oi > 0 else np.nan
+            ),
+            "解讀": interpretation,
+        })
+    return classifications
 
 
 def find_smart_support_resistance(df, window=5):
@@ -2609,6 +2786,122 @@ def find_chart_pattern_setups(
             item["類別"],
             -item["信心分數"],
             item["型態"],
+        ),
+    )
+
+
+def get_pattern_decision_guide(pattern_name):
+    guides = {
+        "Livermore Pivotal Point / Shakeout": (
+            "價格短暫跌破/突破市場共同關注的樞紐位，快速收回並伴隨放量，可能代表弱手停損被清洗後有承接資金。",
+            "關鍵位需由既有支撐/阻力或明確波段 pivot 定義；要求 3 根 K 線內收復，且量能高於近 20 根均量。",
+            "確認收復 pivot 後才考慮觸發；多方停損錨定最近結構支撐/VAL/POC 下方 1.5 ATR。",
+            "bullish",
+        ),
+        "Minervini Volatility Contraction Pattern (VCP)": (
+            "供給逐輪收斂，持倉者拋售壓力下降；價格在底部區域整理，量縮反映可售籌碼減少。",
+            "至少兩段回撤逐步收窄（典型約 15%→8%→3%，而非硬性門檻），後段量能低於前段，價格守住短中期均線/基底。",
+            "買入觸發為最後收縮區或基底 pivot 上方約 0.1 ATR；停損錨定最後收縮低點/結構支撐下方 1.5 ATR。",
+            "bullish",
+        ),
+        "Lynch Growth & Earnings Line": (
+            "以穩定 EPS 成長及 PEG 評估成長是否合理，再用 EPS×15 作粗略參考線，不是精確估值。",
+            "檢查至少數期正向且穩定的獲利增長、PEG<1；確認 EPS 未受一次性因素扭曲，參考線只作估值篩選。",
+            "此為基本面篩選，不單獨觸發買入；若另有看多價格型態，觸發價取其 pivot 上方 0.1 ATR，停損錨定結構支撐。",
+            "bullish",
+        ),
+        "Head & Shoulders Top": (
+            "三個高點中頭部較高且兩肩近似，頸線跌破可能反映高位供給接管。",
+            "左右肩高度差宜小，頭部高於兩肩，需以收盤跌破頸線並觀察量能確認。",
+            "下行觸發位為頸線下方 0.1 ATR；風險錨定右肩高點上方 1.5 ATR。",
+            "bearish",
+        ),
+        "Inverse Head & Shoulders": (
+            "低點中頭部較低且兩肩近似，頸線突破表示賣壓耗盡、需求改善。",
+            "左右肩低點接近，頭部低於兩肩；以收盤站上頸線並伴隨擴量確認。",
+            "上行觸發位為頸線上方 0.1 ATR；停損錨定右肩/最近結構低點下方 1.5 ATR。",
+            "bullish",
+        ),
+        "Double Top": (
+            "價格兩次在相近高位遭遇供給，頸線失守才構成較完整的反轉確認。",
+            "兩個峰值約在 4% 內且間隔至少 5 根 K 線；避免把單次震盪誤判為雙頂。",
+            "空方觸發位為兩峰間谷底下方 0.1 ATR；風險錨定第二峰上方 1.5 ATR。",
+            "bearish",
+        ),
+        "Triple Top": (
+            "多次測試同一阻力仍未有效突破，顯示供給持續；支撐跌破後才確認。",
+            "三個峰值在約 4% 範圍內、測試間有明顯回落，需觀察頸線跌破。",
+            "空方觸發位為箱體/頸線下方 0.1 ATR；風險錨定最近峰值上方 1.5 ATR。",
+            "bearish",
+        ),
+        "Double Bottom": (
+            "兩次測試低位皆有承接，若突破中間反彈高點，代表需求開始勝過供給。",
+            "兩個低點約在 4% 內且有間隔；有效收盤突破中間峰值比單純碰底更重要。",
+            "上行觸發位為中間反彈高點上方 0.1 ATR；停損錨定第二底下方 1.5 ATR。",
+            "bullish",
+        ),
+        "Triple Bottom": (
+            "多次測試支撐均快速回升，顯示下檔吸收；箱頂突破為確認信號。",
+            "三個低點需相近且測試間有反彈，避免將連續下跌誤判為底部。",
+            "上行觸發位為三次測試間的主要峰值上方 0.1 ATR；停損錨定最近低點下方 1.5 ATR。",
+            "bullish",
+        ),
+        "Rounding Bottom": (
+            "賣壓逐步減弱、需求緩慢回升，常見於長時間底部累積。",
+            "觀察較長區間低點居中、兩側回升且成交量逐漸改善；需突破杯口/區間阻力確認。",
+            "上行觸發位為杯口阻力上方 0.1 ATR；停損錨定右側回撤低點/結構支撐下方 1.5 ATR。",
+            "bullish",
+        ),
+        "Cup and Handle": (
+            "圓弧底顯示供給被吸收，把手整理測試持倉穩定度；杯口突破是確認點。",
+            "杯形通常較平滑，把手回撤小於杯深約 1/2，量能在把手收縮、突破時放大。",
+            "上行觸發位為杯口上方 0.1 ATR；停損錨定把手低點/結構支撐下方 1.5 ATR。",
+            "bullish",
+        ),
+        "Bull Flag": (
+            "強勢上行後短暫逆勢整理，可能是獲利了結被新需求吸收。",
+            "先有明確旗桿漲幅，整理通道窄且回撤有限；整理量縮、突破量增為佳。",
+            "上行觸發位為旗形上沿上方 0.1 ATR；停損錨定旗形低點下方 1.5 ATR。",
+            "bullish",
+        ),
+        "Bear Flag": (
+            "急跌後反彈整理但買盤不足，可能是空頭趨勢中的再分配。",
+            "先有明確下跌旗桿，反彈通道窄且量縮；跌破旗形下沿確認延續。",
+            "下行觸發位為旗形下沿下方 0.1 ATR；風險錨定旗形高點上方 1.5 ATR。",
+            "bearish",
+        ),
+        "Rectangle / Darvas Box": (
+            "價格在明確上下界間交換，市場等待方向選擇；箱頂/箱底突破常引發停損與追價流。",
+            "區間需多次觸及上下沿並維持窄幅，突破最好伴隨量能增加；假突破需快速收回視為失敗。",
+            "多方觸發位為箱頂上方 0.1 ATR；若做空則箱底下方 0.1 ATR。停損置於反側箱沿外 1.5 ATR。",
+            "both",
+        ),
+        "Ascending Triangle": (
+            "阻力近水平、低點逐步墊高，買方願意在更高價位承接。",
+            "上沿需多次受阻、低點上升且波幅收斂；突破阻力需收盤確認及量能支持。",
+            "上行觸發位為水平上沿上方 0.1 ATR；停損錨定最近抬高低點/三角底邊下方 1.5 ATR。",
+            "bullish",
+        ),
+        "Descending Triangle": (
+            "支撐近水平、高點逐步降低，賣方在更低位置持續供給。",
+            "下沿需多次測試、高點下降且波幅收斂；收盤跌破支撐確認。",
+            "下行觸發位為水平支撐下方 0.1 ATR；風險錨定最近 lower high 上方 1.5 ATR。",
+            "bearish",
+        ),
+        "Symmetrical Triangle": (
+            "高點降低、低點抬高代表多空平衡收斂；方向需等待有效突破，不預設看多。",
+            "上下趨勢線應收斂且有多次觸碰；突破後收盤確認並觀察量能擴張。",
+            "向上突破上沿或向下跌破下沿 0.1 ATR 才觸發；停損錨定三角另一側結構位外 1.5 ATR。",
+            "both",
+        ),
+    }
+    return guides.get(
+        pattern_name,
+        (
+            "以價格與成交量結構辨識潛在供需變化，需等待價格確認。",
+            "核對型態邊界、成交量及多週期趨勢，避免單一 K 線過度解讀。",
+            "多方觸發位取結構阻力上方 0.1 ATR；停損錨定結構支撐下方 1.5 ATR。",
+            "bullish",
         ),
     )
 
@@ -5388,6 +5681,99 @@ if symbol and app_view == "Stock Analysis":
                                 use_container_width=True,
                                 hide_index=True,
                             )
+                            st.markdown("##### 型態教育與執行參考")
+                            for pattern in pattern_setups:
+                                (
+                                    structure_explanation,
+                                    validation_rules,
+                                    actionable_trigger,
+                                    pattern_direction,
+                                ) = get_pattern_decision_guide(pattern["型態"])
+                                atr_amount = (
+                                    atr_risk["atr"] if atr_risk else 0.0
+                                )
+                                if pattern_direction == "bearish":
+                                    trigger_pivot = (
+                                        support_level
+                                        if support_level > 0
+                                        else curr_price
+                                    )
+                                    trigger_level = max(
+                                        0.0, trigger_pivot - atr_amount * 0.10
+                                    )
+                                    risk_anchor = (
+                                        resistance_level
+                                        if resistance_level > curr_price
+                                        else curr_price
+                                    )
+                                    structural_stop_level = (
+                                        risk_anchor + atr_amount * 1.5
+                                    )
+                                    trigger_label = "下行觸發價"
+                                    stop_label = "空方結構風險錨"
+                                else:
+                                    trigger_pivot = (
+                                        resistance_level
+                                        if resistance_level > curr_price
+                                        else float(
+                                            df_hist["High"].tail(20).max()
+                                        )
+                                        if not df_hist.empty
+                                        and "High" in df_hist.columns
+                                        else curr_price
+                                    )
+                                    trigger_level = (
+                                        trigger_pivot + atr_amount * 0.10
+                                    )
+                                    structural_stop_level = (
+                                        atr_risk["stop_loss"]
+                                        if atr_risk
+                                        else max(
+                                            0.0,
+                                            support_level - atr_amount * 1.5,
+                                        )
+                                    )
+                                    trigger_label = "上行觸發價"
+                                    stop_label = "結構 ATR 停損"
+                                with st.expander(
+                                    f"{pattern['型態']} — {pattern['狀態']} "
+                                    f"({pattern['信心分數']}%)"
+                                ):
+                                    st.markdown(
+                                        f"**結構意義：** {structure_explanation}"
+                                    )
+                                    st.markdown(
+                                        f"**驗證規則：** {validation_rules}"
+                                    )
+                                    st.markdown(
+                                        f"**訊號依據：** {pattern['觀察依據']}"
+                                    )
+                                    st.markdown(
+                                        f"**條件式觸發：** {actionable_trigger}"
+                                    )
+                                    if pattern_direction == "both":
+                                        st.markdown(
+                                            f"上行觸發參考 **${resistance_level + atr_amount * 0.10:.2f}**；"
+                                            f"下行觸發參考 **${max(0.0, support_level - atr_amount * 0.10):.2f}**。"
+                                        )
+                                        st.markdown(
+                                            f"上行風險錨 **${resistance_level + atr_amount * 1.5:.2f}**；"
+                                            f"下行風險錨 **${max(0.0, support_level - atr_amount * 1.5):.2f}**。"
+                                        )
+                                    else:
+                                        st.markdown(
+                                            f"**{trigger_label}：${trigger_level:.2f}**"
+                                            f"（參考 pivot ${trigger_pivot:.2f}，"
+                                            f"加/減 0.1 ATR 確認緩衝）。"
+                                        )
+                                        st.markdown(
+                                            f"**{stop_label}：${structural_stop_level:.2f}**"
+                                            f"；參考結構位外 1.5 ATR，實際風險依跳空與倉位調整。"
+                                        )
+                                    st.caption(
+                                        "狀態是歷史 OHLCV 的規則式判讀；突破觸發代表價格條件符合，"
+                                        "不代表後續必然延續。Lynch earnings-line 本身不構成入場訊號。"
+                                    )
                             forming_count = sum(
                                 item["狀態"] == "形成中"
                                 for item in pattern_setups
@@ -5409,6 +5795,7 @@ if symbol and app_view == "Stock Analysis":
             # ==========================================
             # 7. 機構級全方位分析報告
             # ==========================================
+            options_summary = fetch_options_analysis(symbol, curr_price)
             st.write("---")
             st.subheader(
                 "📝 7. 全方位技術面與機構交易決策報告 (Institutional Analysis"
@@ -5437,6 +5824,205 @@ if symbol and app_view == "Stock Analysis":
                 macd_divergence=bool(all_divergences),
             )
             st.markdown(narrative_output)
+
+            st.markdown("#### 跨因子機構結論與條件式執行計畫")
+            options_available = bool(options_summary.get("available"))
+            options_iv_summary = options_summary.get("iv_summary", {})
+            options_max_pain = options_summary.get("max_pain", np.nan)
+            options_gex = options_summary.get("net_gex", np.nan)
+            options_gamma_level = options_summary.get(
+                "strongest_gamma_level", np.nan
+            )
+            option_buckets = (
+                classify_options_flow(options_summary, curr_price)
+                if options_available
+                else []
+            )
+            call_flow_candidate = any(
+                "Call" in item["分類"] and "候選" in item["分類"]
+                for item in option_buckets
+            )
+            bullish_cpd_divergence = any(
+                signal.get("indicator") == "CPD"
+                and signal.get("type") == "Bullish"
+                for signal in advanced_divergences
+            )
+            macro_regime = (
+                "高波動 / 恐慌"
+                if vix_val >= 25 or (cnn_fng_val is not None and cnn_fng_val <= 40)
+                else "相對平穩"
+            )
+            fng_display = (
+                f"{cnn_fng_val} ({cnn_fng_status})"
+                if cnn_fng_val is not None
+                else cnn_fng_status
+            )
+            dcf_discount = (
+                ((base_val - curr_price) / base_val * 100)
+                if base_val is not None and base_val > 0
+                else None
+            )
+            volume_average_20 = (
+                float(df_hist["Volume"].rolling(20).mean().iloc[-1])
+                if not df_hist.empty
+                and "Volume" in df_hist.columns
+                and pd.notna(df_hist["Volume"].rolling(20).mean().iloc[-1])
+                else np.nan
+            )
+            latest_volume = (
+                float(df_hist["Volume"].iloc[-1])
+                if not df_hist.empty and "Volume" in df_hist.columns
+                else 0.0
+            )
+            high_volume_breakdown = bool(
+                val_price is not None
+                and curr_price < val_price
+                and pd.notna(volume_average_20)
+                and volume_average_20 > 0
+                and latest_volume > volume_average_20 * 1.5
+            )
+            factor_summary = pd.DataFrame([
+                {
+                    "分析支柱": "Macro VIX / Fear & Greed",
+                    "現況": (
+                        f"VIX {vix_val:.2f}；CNN F&G {fng_display}；"
+                        f" regime：{macro_regime}"
+                    ),
+                },
+                {
+                    "分析支柱": "DCF / 安全邊際",
+                    "現況": (
+                        f"現價 ${curr_price:.2f}；Approach #2 ${base_val:.2f}；"
+                        f"安全邊際 {dcf_discount:.1f}%"
+                        if dcf_discount is not None
+                        else "DCF 資料不足"
+                    ),
+                },
+                {
+                    "分析支柱": "Volume Profile",
+                    "現況": (
+                        f"POC ${poc_price:.2f}；"
+                        f"VAL ${val_price:.2f}" if val_price is not None
+                        else f"POC ${poc_price:.2f}；VAL N/A"
+                    )
+                    + (
+                        f"；VAH ${vah_price:.2f}"
+                        if vah_price is not None
+                        else "；VAH N/A"
+                    ),
+                },
+                {
+                    "分析支柱": "Options / Max Pain / GEX",
+                    "現況": (
+                        f"Max Pain ${options_max_pain:.2f}；"
+                        f"net GEX {options_gex / 1e6:+.1f}M；"
+                        f"最大 |Net GEX| 履約價 ${options_gamma_level:.2f}"
+                        if options_available
+                        and pd.notna(options_max_pain)
+                        and pd.notna(options_gex)
+                        and pd.notna(options_gamma_level)
+                        else (
+                            f"Max Pain ${options_max_pain:.2f}；"
+                            "GEX 或鏈資料不足"
+                            if options_available and pd.notna(options_max_pain)
+                            else "選擇權資料不可用"
+                        )
+                    ),
+                },
+                {
+                    "分析支柱": "技術背離 / 動能",
+                    "現況": (
+                        f"CPD Bullish divergence：{'是' if bullish_cpd_divergence else '否'}；"
+                        f"MACD/RSI 共振背離：{len(all_divergences)} 個候選"
+                    ),
+                },
+            ])
+            st.dataframe(
+                factor_summary,
+                use_container_width=True,
+                hide_index=True,
+            )
+            if options_available:
+                options_skew = options_iv_summary.get(
+                    "Put-Call IV Skew", np.nan
+                )
+                max_pain_alignment = (
+                    "現價上方"
+                    if pd.notna(options_max_pain) and options_max_pain > curr_price
+                    else "現價下方"
+                    if pd.notna(options_max_pain)
+                    else "資料不足"
+                )
+                gamma_context = (
+                    (
+                        "正 GEX 假設下偏向波動緩和"
+                        if options_gex > 0
+                        else "負 GEX 假設下偏向波動放大"
+                    )
+                    if pd.notna(options_gex)
+                    else "GEX 估算不可用"
+                )
+                st.caption(
+                    f"選擇權補充：Max Pain 位於{max_pain_alignment}；"
+                    f"{gamma_context}；近月 Put-Call IV skew "
+                    f"{options_skew * 100:+.2f}%"
+                    if pd.notna(options_skew)
+                    else f"選擇權補充：Max Pain 位於{max_pain_alignment}；"
+                    f"{gamma_context}；IV skew 資料不足"
+                )
+
+            if high_volume_breakdown:
+                st.warning(
+                    f"風險條件已觸發：收盤低於 VAL ${val_price:.2f} 且成交量高於"
+                    " 20 日均量 1.5 倍；依計畫暫停新增多單，等待重新站回 VAL 並確認。"
+                )
+            elif (
+                curr_price <= support_level * 1.01
+                and bullish_cpd_divergence
+                and call_flow_candidate
+            ):
+                st.success(
+                    f"Tier-1 條件觀察：若價格測試支撐 ${support_level:.2f} 後收復，"
+                    "且 CPD 看多背離仍有效、Call 異常流量獲得 Bid/Ask 確認，"
+                    f"可按風險預算考慮分批試單；參考結構停損 "
+                    f"${atr_risk['stop_loss']:.2f}。"
+                    if atr_risk
+                    else f"Tier-1 條件觀察：需在支撐 ${support_level:.2f} 確認反轉，"
+                    "並核實 CPD 背離及 Call 流量方向後再決定。"
+                )
+            else:
+                st.info(
+                    "目前尚未同時確認「支撐回收 + 看多 CPD 背離 + Call 主動買入」；"
+                    "不因單一選擇權掃單或指標進場，等待價格與成交量確認。"
+                )
+            st.markdown(
+                f"- **若/則（多方）**：若收盤收復支撐/VAL，且 CPD 看多背離與"
+                f"主動 Call 買盤獲確認，才考慮 Tier-1 試單；停損錨定結構位"
+                f" ${atr_risk['stop_loss']:.2f}，第一目標看阻力 "
+                f"${resistance_level:.2f}。"
+                if atr_risk
+                else
+                f"- **若/則（多方）**：若收盤收復支撐/VAL 並獲 CPD 與主動買盤確認，"
+                f"再考慮小額試單；結構支撐 ${support_level:.2f}，阻力目標 "
+                f"${resistance_level:.2f}。"
+            )
+            st.markdown(
+                f"- **若/則（風險）**：若收盤跌破 VAL "
+                f"{f'${val_price:.2f}' if val_price is not None else '(若可用)'}"
+                " 且放量（>20 日均量 1.5 倍），則暫停加碼並等待收復；"
+                "若價格在阻力附近且出現 MACD 動能退出/RSI 超買，則依結構追蹤停損"
+                f" ${atr_risk['trailing_stop']:.2f} 管理風險。"
+                if atr_risk
+                else
+                f"- **若/則（風險）**：若收盤跌破 VAL"
+                f" {f'${val_price:.2f}' if val_price is not None else '(若可用)'}"
+                " 且放量，則暫停加碼；阻力附近動能耗竭時優先減少風險。"
+            )
+            st.caption(
+                "此為條件式研究情境，不構成個人化投資建議。GEX、Max Pain、"
+                "公開異常成交及技術型態均為近似指標，須核對實際成交方向、"
+                "滑價、財報與風險承受度。"
+            )
 
             # ==========================================
             # 8. 綜合投資評級 Engine
@@ -6002,6 +6588,107 @@ if symbol and app_view == "Stock Analysis":
                     )
                 )
 
+                st.markdown("##### 📉 IV Term Structure / Smile & Skew")
+                iv_term_structure = options_summary.get(
+                    "iv_term_structure", pd.DataFrame()
+                )
+                if not iv_term_structure.empty:
+                    iv_display = iv_term_structure.copy()
+                    for iv_column in (
+                        "ATM Call IV",
+                        "ATM Put IV",
+                        "ATM IV",
+                        "Put-Call Skew",
+                        "OTM Put IV",
+                        "OTM Call IV",
+                        "25D Proxy Skew",
+                    ):
+                        if iv_column in iv_display:
+                            iv_display[iv_column] *= 100
+                    st.dataframe(
+                        iv_display.style.format({
+                            "ATM Call IV": "{:.2f}%",
+                            "ATM Put IV": "{:.2f}%",
+                            "ATM IV": "{:.2f}%",
+                            "Put-Call Skew": "{:+.2f}%",
+                            "OTM Put IV": "{:.2f}%",
+                            "OTM Call IV": "{:.2f}%",
+                            "25D Proxy Skew": "{:+.2f}%",
+                        }, na_rep="N/A"),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    available_term_iv = iv_term_structure.dropna(subset=["ATM IV"])
+                    if len(available_term_iv) >= 2:
+                        front_iv = float(available_term_iv.iloc[0]["ATM IV"])
+                        back_iv = float(available_term_iv.iloc[-1]["ATM IV"])
+                        term_signal = (
+                            "近月 IV 高於遠月，可能反映事件風險/短期避險需求。"
+                            if front_iv > back_iv * 1.05
+                            else "遠月 IV 高於近月，市場可能定價較長期不確定性。"
+                            if back_iv > front_iv * 1.05
+                            else "近遠月 ATM IV 接近，期限結構相對平坦。"
+                        )
+                        st.caption(
+                            f"前端 ATM IV {front_iv:.1%}；遠端 ATM IV {back_iv:.1%}。"
+                            f"{term_signal} OTM put/call skew 為以履約價區間近似的偏斜指標，"
+                            "不是精確 25-delta 插值。"
+                        )
+                    else:
+                        st.caption(
+                            "可用到期日不足兩個，無法比較近月與遠月 IV；"
+                            "OTM IV 亦為履約價區間近似。"
+                        )
+                else:
+                    st.info("到期日 IV 樣本不足，無法建立期限結構。")
+
+                st.markdown("##### 🧮 Gamma Exposure (GEX) Approximation")
+                gamma_exposure = options_summary.get(
+                    "gamma_exposure", pd.DataFrame()
+                )
+                net_gex = options_summary.get("net_gex", np.nan)
+                gex_level = options_summary.get(
+                    "strongest_gamma_level", np.nan
+                )
+                if not gamma_exposure.empty and pd.notna(net_gex):
+                    gamma_cols = st.columns(3)
+                    gamma_cols[0].metric(
+                        "近 45 日估算 Net GEX",
+                        f"${net_gex / 1e6:+,.1f}M",
+                    )
+                    gamma_cols[1].metric(
+                        "最大 |Net GEX| 履約價",
+                        f"${gex_level:.2f}" if pd.notna(gex_level) else "N/A",
+                    )
+                    gamma_cols[2].metric(
+                        "可能的 Gamma 區域",
+                        (
+                            "正 GEX（可能抑制波動）"
+                            if net_gex > 0
+                            else "負 GEX（可能放大波動）"
+                        ),
+                    )
+                    st.dataframe(
+                        gamma_exposure.style.format({
+                            "履約價": "${:.2f}",
+                            "Call GEX": "${:,.0f}",
+                            "Put GEX": "${:,.0f}",
+                            "Net GEX": "${:,.0f}",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.caption(
+                        "GEX 以 Gamma × OI × 合約乘數 × 現價² × 1% 估算，"
+                        "Call 正、Put 負是假設的 dealer 對手方慣例；"
+                        "公開 OI 不提供實際 dealer 持倉方向，僅供觀察可能 pin/加速區。"
+                    )
+                else:
+                    st.info(
+                        "此鏈缺少有效 Gamma 或未平倉量，無法估算 GEX；"
+                        "Max Pain 不等同價格預測。"
+                    )
+
                 st.markdown(
                     "##### 🔎 Smart Money Unusual Flow（Volume > 2.5 × OI 且 Volume"
                     " > 1,000）"
@@ -6036,6 +6723,26 @@ if symbol and app_view == "Stock Analysis":
                     "🤖 **AI Flow Interpretation**："
                     f" {interpret_options_flow(options_summary)}"
                 )
+                flow_buckets = classify_options_flow(
+                    options_summary, curr_price
+                )
+                st.markdown("##### 🧭 Institutional Sweep Sentiment Engine")
+                if flow_buckets:
+                    st.dataframe(
+                        pd.DataFrame(flow_buckets).style.format({
+                            "履約價": "${:.2f}",
+                            "成交量": "{:,.0f}",
+                            "Volume/OI": "{:.2f}x",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.caption(
+                        "Bullish Put Writing / Bearish Call Buying 等方向無法單靠期權鏈確認；"
+                        "需比對逐筆成交價相對 Bid/Ask、IV 變化及後續標的反應。"
+                    )
+                else:
+                    st.info("沒有可分類的異常流量候選合約。")
 
     except Exception as e:
         st.error(f"分析時發生未預期錯誤: {e}")
