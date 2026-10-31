@@ -12,6 +12,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
 from ta_utils import calculate_synchronized_macd
+from utils.quant import (
+    backtest_signal_strategy,
+    rolling_correlation_history,
+    rolling_correlation_matrix,
+)
+from utils.valuation import simulate_dcf_intrinsic_values, summarize_monte_carlo
 
 # Page Configuration
 st.set_page_config(
@@ -286,40 +292,47 @@ if st.session_state.get("watchlist_revision") != WATCHLIST_REVISION:
     if not WATCHLIST_PATH.exists():
         save_watchlist(st.session_state.watchlist)
 
-st.sidebar.title("⭐ Watchlist Manager")
-with st.sidebar.form("watchlist_add_form"):
-    new_symbol = (
-        st.text_input("Stock ticker", key="new_watchlist_symbol").strip().upper()
-    )
-    add_symbol = st.form_submit_button("Add ticker", use_container_width=True)
-if add_symbol and new_symbol and new_symbol not in st.session_state.watchlist:
-    st.session_state.watchlist.append(new_symbol)
-    save_watchlist(st.session_state.watchlist)
-    st.rerun()
-
-with st.sidebar.expander(f"Saved tickers ({len(st.session_state.watchlist)})"):
-    if st.session_state.watchlist:
-        st.dataframe(
-            pd.DataFrame({"Ticker": st.session_state.watchlist}),
-            height=260,
-            hide_index=True,
-            use_container_width=True,
+@st.fragment
+def render_watchlist_controls():
+    st.sidebar.title("⭐ Watchlist Manager")
+    with st.sidebar.form("watchlist_add_form"):
+        new_symbol = (
+            st.text_input("Stock ticker", key="new_watchlist_symbol").strip().upper()
         )
-        ticker_to_remove = st.selectbox(
-            "Ticker to remove", st.session_state.watchlist, key="ticker_to_remove"
-        )
-        if st.button(
-            "Remove selected ticker",
-            key="remove_selected_ticker",
-            use_container_width=True,
-        ):
-            st.session_state.watchlist.remove(ticker_to_remove)
-            save_watchlist(st.session_state.watchlist)
-            st.rerun()
-    else:
-        st.caption("The watchlist is empty.")
+        add_symbol = st.form_submit_button("Add ticker", use_container_width=True)
+    if add_symbol and new_symbol and new_symbol not in st.session_state.watchlist:
+        st.session_state.watchlist.append(new_symbol)
+        save_watchlist(st.session_state.watchlist)
+        st.rerun(scope="fragment")
 
-st.sidebar.caption("Only saved tickers are scanned.")
+    with st.sidebar.expander(f"Saved tickers ({len(st.session_state.watchlist)})"):
+        if st.session_state.watchlist:
+            st.dataframe(
+                pd.DataFrame({"Ticker": st.session_state.watchlist}),
+                height=260,
+                hide_index=True,
+                use_container_width=True,
+            )
+            ticker_to_remove = st.selectbox(
+                "Ticker to remove",
+                st.session_state.watchlist,
+                key="ticker_to_remove",
+            )
+            if st.button(
+                "Remove selected ticker",
+                key="remove_selected_ticker",
+                use_container_width=True,
+            ):
+                st.session_state.watchlist.remove(ticker_to_remove)
+                st.session_state.pop("ticker_to_remove", None)
+                save_watchlist(st.session_state.watchlist)
+                st.rerun(scope="fragment")
+        else:
+            st.caption("The watchlist is empty.")
+    st.sidebar.caption("Only saved tickers are scanned.")
+
+
+render_watchlist_controls()
 
 
 def get_seasonal_roadmap_context(today=None):
@@ -363,6 +376,7 @@ app_view = st.radio(
         "Scanner Dashboard",
         "Stock Analysis",
         "💼 Portfolio & Secondary Allocator",
+        "Quant Research",
     ],
     horizontal=True,
     key="app_view",
@@ -442,7 +456,7 @@ def get_vix_value():
     return float(history["Close"].iloc[-1]) if not history.empty else 20.0
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=datetime.timedelta(hours=1))
 def fetch_ticker_data(symbol_str):
     yf_symbol = to_yfinance_symbol(symbol_str)
     t = yf.Ticker(yf_symbol)
@@ -611,18 +625,94 @@ def fetch_ticker_data(symbol_str):
     return info, hist, bs, fin, cf, q_fin, q_bs, q_cf
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=datetime.timedelta(hours=1), show_spinner=False)
 def fetch_scanner_history(symbol_str):
     return yf.Ticker(to_yfinance_symbol(symbol_str)).history(
         period="1y", interval="1d"
     )
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=datetime.timedelta(hours=1), show_spinner=False)
 def fetch_intraday_history(symbol_str):
     return yf.Ticker(to_yfinance_symbol(symbol_str)).history(
         period="60d", interval="1h"
     )
+
+
+@st.cache_data(ttl=datetime.timedelta(hours=1), show_spinner=False)
+def fetch_batch_price_history(symbols, period="2y", interval="1d"):
+    """Fetch multiple symbols in one Yahoo request and return ticker-keyed frames."""
+    normalized_symbols = tuple(
+        (symbol, to_yfinance_symbol(symbol))
+        for symbol in dict.fromkeys(symbols)
+        if isinstance(symbol, str) and symbol.strip()
+    )
+    if not normalized_symbols:
+        return {}, []
+    yahoo_symbols = [yahoo_symbol for _, yahoo_symbol in normalized_symbols]
+    failures = []
+    batch_error = None
+    try:
+        downloaded = yf.download(
+            tickers=yahoo_symbols,
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            group_by="ticker",
+            progress=False,
+            threads=True,
+            timeout=15,
+            multi_level_index=True,
+        )
+    except Exception as error:
+        downloaded = pd.DataFrame()
+        batch_error = error
+
+    frames = {}
+    if not downloaded.empty:
+        for display_symbol, yahoo_symbol in normalized_symbols:
+            frame = pd.DataFrame()
+            if isinstance(downloaded.columns, pd.MultiIndex):
+                if yahoo_symbol in downloaded.columns.get_level_values(0):
+                    frame = downloaded.xs(
+                        yahoo_symbol, axis=1, level=0, drop_level=True
+                    )
+                elif yahoo_symbol in downloaded.columns.get_level_values(1):
+                    frame = downloaded.xs(
+                        yahoo_symbol, axis=1, level=1, drop_level=True
+                    )
+            elif len(normalized_symbols) == 1:
+                frame = downloaded.copy()
+            if not frame.empty:
+                frame = frame.loc[:, ~frame.columns.duplicated()].copy()
+                if "Close" in frame.columns:
+                    frames[display_symbol] = frame
+
+    missing_symbols = [
+        display_symbol
+        for display_symbol, _ in normalized_symbols
+        if display_symbol not in frames
+    ]
+    for display_symbol in missing_symbols:
+        try:
+            frame = yf.Ticker(to_yfinance_symbol(display_symbol)).history(
+                period=period,
+                interval=interval,
+                timeout=15,
+            )
+            if not frame.empty and "Close" in frame.columns:
+                frames[display_symbol] = frame
+            else:
+                failures.append(f"{display_symbol}: no OHLCV history returned")
+        except Exception as error:
+            failures.append(f"{display_symbol}: {error}")
+    if batch_error is not None and len(frames) < len(normalized_symbols):
+        failures.insert(
+            0,
+            "Batch history failed; per-symbol fallback was incomplete: "
+            f"{batch_error}",
+        )
+    return frames, failures
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2210,6 +2300,29 @@ def find_volume_poc(df, bins=15):
     return poc_price
 
 
+def calculate_volume_profile(df, bins=24):
+    required = {"Close", "Volume"}
+    if df.empty or not required.issubset(df.columns):
+        return np.array([], dtype=float), np.array([], dtype=float)
+    prices = pd.to_numeric(df["Close"], errors="coerce").to_numpy(dtype=float)
+    volumes = pd.to_numeric(df["Volume"], errors="coerce").to_numpy(dtype=float)
+    valid = (
+        np.isfinite(prices)
+        & np.isfinite(volumes)
+        & (prices > 0)
+        & (volumes > 0)
+    )
+    if not valid.any():
+        return np.array([], dtype=float), np.array([], dtype=float)
+    profile, edges = np.histogram(
+        prices[valid],
+        bins=max(1, min(int(bins), int(valid.sum()))),
+        weights=volumes[valid],
+    )
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    return centers.astype(float), profile.astype(float)
+
+
 def find_volume_value_area(df, bins=15, value_area_fraction=0.70):
     required = {"Close", "Volume"}
     if df.empty or not required.issubset(df.columns):
@@ -2346,6 +2459,79 @@ def calculate_atr_risk_metrics(
     }
 
 
+def build_pattern_projection_scenarios(history, patterns, atr_period=14):
+    required = {"High", "Low", "Close"}
+    if history.empty or not required.issubset(history.columns):
+        return []
+    high = pd.to_numeric(history["High"], errors="coerce")
+    low = pd.to_numeric(history["Low"], errors="coerce")
+    close = pd.to_numeric(history["Close"], errors="coerce")
+    previous_close = close.shift(1)
+    true_range = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr_values = true_range.rolling(atr_period, min_periods=1).mean()
+    atr = float(atr_values.iloc[-1]) if not atr_values.empty else 0.0
+    current_price = float(close.iloc[-1]) if not close.empty else 0.0
+    if not np.isfinite(atr) or atr <= 0 or current_price <= 0:
+        return []
+
+    scenarios = []
+    scenario_patterns = {
+        "Double Bottom",
+        "Triple Bottom",
+        "Rounding Bottom",
+        "Cup and Handle",
+    }
+    for pattern in patterns:
+        name = pattern.get("型態")
+        if name not in scenario_patterns:
+            continue
+        breakout_level = pattern.get("突破位")
+        structure_low = pattern.get("結構低點")
+        if (
+            breakout_level is None
+            or structure_low is None
+            or not np.isfinite(float(breakout_level))
+            or not np.isfinite(float(structure_low))
+            or float(breakout_level) <= float(structure_low)
+        ):
+            continue
+        breakout_level = float(breakout_level)
+        structure_low = float(structure_low)
+        structure_depth = breakout_level - structure_low
+        measured_target = breakout_level + structure_depth
+        lower_14 = max(
+            0.0,
+            min(current_price - atr * np.sqrt(14), structure_low - 0.5 * atr),
+        )
+        lower_30 = max(
+            0.0,
+            min(current_price - atr * np.sqrt(30), structure_low - 0.5 * atr),
+        )
+        scenarios.append({
+            "pattern": name,
+            "confidence": int(pattern.get("信心分數", 0)),
+            "status": pattern.get("狀態", "形成中"),
+            "breakout_level": breakout_level,
+            "structure_low": structure_low,
+            "structure_depth": structure_depth,
+            "measured_target": measured_target,
+            "atr": atr,
+            "current_price": current_price,
+            "lower_14": lower_14,
+            "lower_30": lower_30,
+            "structure_stop": max(0.0, structure_low - 1.5 * atr),
+            "points": pattern.get("圖表結構點", []),
+        })
+    return scenarios
+
+
 def find_chart_pattern_setups(
     history,
     support=None,
@@ -2372,16 +2558,40 @@ def find_chart_pattern_setups(
     last_price = float(close.iloc[-1])
     patterns = []
 
-    def add_pattern(category, name, confidence, status, evidence):
+    def add_pattern(
+        category,
+        name,
+        confidence,
+        status,
+        evidence,
+        structure_points=None,
+        breakout_level=None,
+        structure_low=None,
+    ):
         confidence = max(0, min(100, int(round(confidence))))
         if confidence >= min_confidence:
-            patterns.append({
+            pattern = {
                 "類別": category,
                 "型態": name,
                 "信心分數": confidence,
                 "狀態": status,
                 "觀察依據": evidence,
-            })
+            }
+            if structure_points:
+                pattern["圖表結構點"] = structure_points
+            if (
+                breakout_level is not None
+                and pd.notna(breakout_level)
+                and np.isfinite(float(breakout_level))
+            ):
+                pattern["突破位"] = float(breakout_level)
+            if (
+                structure_low is not None
+                and pd.notna(structure_low)
+                and np.isfinite(float(structure_low))
+            ):
+                pattern["結構低點"] = float(structure_low)
+            patterns.append(pattern)
 
     def breakout_status(direction, level):
         if direction == "bullish" and last_price > level:
@@ -2450,6 +2660,12 @@ def find_chart_pattern_setups(
                 confidence,
                 "突破觸發",
                 f"近 3 根 K 線跌破並收復 ${level:.2f}；量能約 {surge_ratio:.1f}x 均量。",
+                structure_points=[
+                    (data.index[-3], float(recent["Low"].min()), "Shakeout low"),
+                    (data.index[-1], last_price, "Pivot recovery"),
+                ],
+                breakout_level=level,
+                structure_low=float(recent["Low"].min()),
             )
 
     # Minervini VCP: successively smaller peak-to-trough contractions and drying volume.
@@ -2665,6 +2881,34 @@ def find_chart_pattern_setups(
                 55 + max(0, int((0.04 - dispersion) * 250)),
                 "突破觸發" if triggered else "形成中",
                 f"{count} 個波段轉折差異 {dispersion:.1%}；確認位約 ${neckline:.2f}。",
+                structure_points=(
+                    [
+                        (data.index[position], float(values[position]), "Bottom")
+                        for position in group
+                    ]
+                    + [
+                        (
+                            data.index[
+                                group[0]
+                                + int(
+                                    np.argmax(
+                                        high_values[group[0]:group[-1] + 1]
+                                    )
+                                    if not is_top
+                                    else np.argmin(
+                                        low_values[group[0]:group[-1] + 1]
+                                    )
+                                )
+                            ],
+                            neckline,
+                            "Breakout pivot",
+                        )
+                    ]
+                    if not is_top
+                    else []
+                ),
+                breakout_level=neckline if not is_top else None,
+                structure_low=min(prices) if not is_top else None,
             )
             break
 
@@ -2685,6 +2929,17 @@ def find_chart_pattern_setups(
                     55 + max(0, int((0.12 - rim_difference) * 150)),
                     breakout_status("bullish", max(start_price, end_price)),
                     f"60 根 K 線底部回升 {recovery:.1%}；杯口區約 ${max(start_price, end_price):.2f}。",
+                    structure_points=[
+                        (data.index[-60], start_price, "Left rim"),
+                        (
+                            data.index[-60 + minimum_position],
+                            minimum_price,
+                            "Rounded trough",
+                        ),
+                        (data.index[-1], end_price, "Right rim"),
+                    ],
+                    breakout_level=max(start_price, end_price),
+                    structure_low=minimum_price,
                 )
 
         rim = max(float(np.max(series[:12])), float(np.max(series[-18:-8])))
@@ -2699,6 +2954,22 @@ def find_chart_pattern_setups(
                 55 + (15 if end_price >= rim * 0.95 else 0),
                 breakout_status("bullish", rim),
                 f"杯深 {cup_depth:.1%}；把手回撤 {handle_depth:.1%}；杯口約 ${rim:.2f}。",
+                structure_points=[
+                    (data.index[-60], float(series[0]), "Left rim"),
+                    (
+                        data.index[-60 + int(np.argmin(series[12:-8])) + 12],
+                        cup_bottom,
+                        "Cup trough",
+                    ),
+                    (
+                        data.index[-18 + int(np.argmax(series[-18:-8]))],
+                        rim,
+                        "Right rim",
+                    ),
+                    (data.index[-8 + int(np.argmin(series[-8:]))], handle_low, "Handle low"),
+                ],
+                breakout_level=rim,
+                structure_low=min(cup_bottom, handle_low),
             )
 
     # Bull/bear flags: impulse leg followed by a short, counter-trend consolidation.
@@ -3209,6 +3480,325 @@ def open_scanner_signal():
         st.session_state.app_view = "Stock Analysis"
 
 
+@st.fragment
+def render_correlation_workspace(saved_tickers):
+    benchmarks = ["SPY.US", "QQQ.US", "IWM.US", "DIA.US", "^VIX"]
+    available_assets = list(dict.fromkeys(saved_tickers + benchmarks))
+    default_assets = list(dict.fromkeys(saved_tickers[:3] + ["SPY.US", "QQQ.US"]))
+    selected_assets = st.multiselect(
+        "Watchlist assets and benchmark proxies",
+        available_assets,
+        default=[symbol for symbol in default_assets if symbol in available_assets],
+        key="quant_correlation_assets",
+    )
+    window = st.selectbox(
+        "Rolling correlation window (trading days)",
+        [30, 90],
+        index=0,
+        key="quant_correlation_window",
+    )
+    if len(selected_assets) < 2:
+        st.info("Select at least two assets to calculate rolling correlations.")
+        return
+    with st.spinner("Loading cached OHLCV history..."):
+        histories, fetch_errors = fetch_batch_price_history(
+            tuple(selected_assets), period="2y", interval="1d"
+        )
+    if fetch_errors:
+        with st.expander("History retrieval warnings"):
+            for message in fetch_errors:
+                st.caption(message)
+    if len(histories) < 2:
+        st.warning("At least two complete price histories are required.")
+        return
+    matrix = rolling_correlation_matrix(histories, window=window)
+    if matrix.empty:
+        st.info(
+            f"Not enough aligned return observations for a {window}-day matrix."
+        )
+    else:
+        st.markdown(f"##### Latest {window}-day rolling return correlation")
+        st.dataframe(
+            matrix.style.format("{:.2f}").background_gradient(
+                cmap="RdYlGn", vmin=-1, vmax=1
+            ),
+            use_container_width=True,
+        )
+
+    history = rolling_correlation_history(histories, window=window)
+    pairs = list(history.columns)
+    if pairs:
+        selected_pair = st.selectbox(
+            "Pair history",
+            pairs,
+            key="quant_correlation_pair",
+        )
+        pair_series = history[selected_pair].dropna()
+        if not pair_series.empty:
+            figure = go.Figure()
+            figure.add_trace(
+                go.Scatter(
+                    x=pair_series.index,
+                    y=pair_series,
+                    mode="lines",
+                    name=selected_pair,
+                )
+            )
+            figure.add_hline(y=0, line_dash="dot", line_color="gray")
+            figure.update_yaxes(range=[-1, 1], title="Correlation")
+            figure.update_layout(
+                height=360,
+                margin=dict(l=20, r=20, t=30, b=20),
+                title=f"{window}-day rolling correlation: {selected_pair}",
+            )
+            st.plotly_chart(figure, use_container_width=True)
+        else:
+            st.info("The selected pair has no aligned rolling observations.")
+    else:
+        st.info("Select two symbols with overlapping trading history.")
+
+
+@st.fragment
+def render_divergence_backtest(saved_tickers):
+    if not saved_tickers:
+        st.info("Add tickers to the saved watchlist before running a backtest.")
+        return
+    selected_ticker = st.selectbox(
+        "Backtest ticker",
+        saved_tickers,
+        key="quant_backtest_ticker",
+    )
+    signal_rule = st.selectbox(
+        "Entry signal",
+        [
+            "Signal_Hist_Turn only",
+            "Signal_Hist_Turn + bullish RSI divergence",
+            "Signal_Hist_Turn + bullish CPD divergence",
+            "Signal_Hist_Turn + bullish MFI divergence",
+            "Signal_Hist_Turn + any bullish divergence",
+        ],
+        key="quant_backtest_rule",
+    )
+    col_target, col_stop, col_holding = st.columns(3)
+    target_return = col_target.number_input(
+        "Target (%)", min_value=1.0, max_value=100.0, value=15.0, step=1.0
+    )
+    stop_return = col_stop.number_input(
+        "Stop (%)", min_value=1.0, max_value=50.0, value=5.0, step=1.0
+    )
+    hold_limit = col_holding.number_input(
+        "Maximum holding (bars)",
+        min_value=1,
+        max_value=252,
+        value=30,
+        step=1,
+    )
+    histories, fetch_errors = fetch_batch_price_history(
+        (selected_ticker,), period="2y", interval="1d"
+    )
+    if fetch_errors:
+        st.warning("; ".join(fetch_errors))
+    history = histories.get(selected_ticker)
+    if history is None or history.empty:
+        st.info("No usable historical OHLCV data is available for this ticker.")
+        return
+
+    data = calculate_synchronized_macd(history.copy().sort_index())
+    base_signals = data["Signal_Hist_Turn"].fillna(False).astype(bool)
+    signal_mask = base_signals.copy()
+    if signal_rule != "Signal_Hist_Turn only":
+        indicator_name = (
+            "RSI" if "RSI divergence" in signal_rule else
+            "CPD" if "CPD divergence" in signal_rule else
+            "MFI" if "MFI divergence" in signal_rule else
+            None
+        )
+        bullish = find_single_indicator_divergences(
+            history,
+            lookback_days=365 * 3,
+        )
+        bullish = [
+            item for item in bullish
+            if item["Signal Type"] == "Bullish"
+            and (indicator_name is None or item["Indicator"] == indicator_name)
+        ]
+        confirmed_divergence_indexes = []
+        bar_dates = np.asarray([pd.Timestamp(value).date() for value in data.index])
+        for event in bullish:
+            event_date = pd.Timestamp(event["Trigger Date"]).date()
+            pivots = np.flatnonzero(bar_dates == event_date)
+            if not pivots.size:
+                continue
+            confirmed_index = int(pivots[-1]) + 3
+            if confirmed_index >= len(data):
+                continue
+            turn_indexes = np.flatnonzero(
+                base_signals.iloc[confirmed_index:min(confirmed_index + 4, len(data))]
+            )
+            if turn_indexes.size:
+                confirmed_divergence_indexes.append(
+                    confirmed_index + int(turn_indexes[0])
+                )
+        signal_mask[:] = False
+        if confirmed_divergence_indexes:
+            signal_mask.iloc[confirmed_divergence_indexes] = True
+
+    result = backtest_signal_strategy(
+        data,
+        signal_mask,
+        hold_limit=int(hold_limit),
+        target_return=target_return / 100.0,
+        stop_return=stop_return / 100.0,
+    )
+    metrics = result["metrics"]
+    metric_a, metric_b, metric_c, metric_d = st.columns(4)
+    metric_a.metric("Trades", metrics["trade_count"])
+    metric_b.metric(
+        "Win rate",
+        f"{metrics['win_rate']:.1f}%" if pd.notna(metrics["win_rate"]) else "N/A",
+    )
+    metric_c.metric(
+        "Average holding",
+        (
+            f"{metrics['average_holding_period']:.1f} bars"
+            if pd.notna(metrics["average_holding_period"])
+            else "N/A"
+        ),
+    )
+    metric_d.metric(
+        "Max drawdown",
+        f"{metrics['max_drawdown']:.1f}%" if pd.notna(metrics["max_drawdown"]) else "N/A",
+    )
+    if not result["trades"].empty:
+        st.dataframe(
+            result["trades"].style.format({
+                "Entry Price": "${:.2f}",
+                "Exit Price": "${:.2f}",
+                "Return (%)": "{:.2f}%",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No eligible trades were generated by this rule in the available history.")
+    st.caption(
+        "Signals are executed at the next bar's close; divergence pivots are not "
+        "eligible until three confirmation bars have elapsed. If stop and target "
+        "are both touched in one bar, the stop is assumed first."
+    )
+
+
+@st.fragment
+def render_chart_layout_fragment(history, symbol):
+    if history is None or history.empty or "Close" not in history:
+        st.info("No price history is available for the chart preview.")
+        return
+    control_a, control_b, control_c = st.columns(3)
+    lookback = control_a.selectbox(
+        "Preview range",
+        ["3M", "6M", "1Y", "2Y", "All"],
+        index=2,
+        key=f"chart_preview_range_{symbol}",
+    )
+    chart_style = control_b.selectbox(
+        "Chart type",
+        ["Candlestick", "Close"],
+        key=f"chart_preview_style_{symbol}",
+    )
+    show_volume = control_c.checkbox(
+        "Show volume",
+        value=True,
+        key=f"chart_preview_volume_{symbol}",
+    )
+    periods = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504}
+    visible = history.tail(periods[lookback]) if lookback in periods else history
+    figure = go.Figure()
+    if chart_style == "Candlestick" and {"Open", "High", "Low"}.issubset(visible):
+        figure.add_trace(
+            go.Candlestick(
+                x=visible.index,
+                open=visible["Open"],
+                high=visible["High"],
+                low=visible["Low"],
+                close=visible["Close"],
+                name=symbol,
+            )
+        )
+    else:
+        figure.add_trace(
+            go.Scatter(
+                x=visible.index,
+                y=visible["Close"],
+                mode="lines",
+                name=f"{symbol} Close",
+            )
+        )
+    if show_volume and "Volume" in visible:
+        figure.add_trace(
+            go.Bar(
+                x=visible.index,
+                y=visible["Volume"],
+                name="Volume",
+                yaxis="y2",
+                opacity=0.25,
+            )
+        )
+        figure.update_layout(
+            yaxis2=dict(overlaying="y", side="right", showgrid=False, title="Volume")
+        )
+    figure.update_layout(
+        height=420,
+        margin=dict(l=20, r=20, t=25, b=20),
+        title=f"{symbol} · {lookback} preview",
+        xaxis_rangeslider_visible=False,
+    )
+    st.plotly_chart(figure, use_container_width=True)
+
+
+@st.fragment
+def render_options_flow_filter(options_summary):
+    flow = options_summary.get("unusual", pd.DataFrame()).copy()
+    if flow.empty:
+        st.info("No unusual options flow is available to filter.")
+        return
+    expiry_values = sorted(flow["Expiry"].dropna().astype(str).unique())
+    expiries = ["All expirations"] + expiry_values
+    selected_expiry = st.selectbox(
+        "Expiration filter",
+        expiries,
+        key="option_flow_expiry_filter",
+    )
+    selected_type = st.selectbox(
+        "Contract type",
+        ["All", "Call", "Put"],
+        key="option_flow_type_filter",
+    )
+    if selected_expiry != "All expirations":
+        flow = flow[flow["Expiry"].astype(str) == selected_expiry]
+    if selected_type != "All":
+        flow = flow[flow["Option Type"] == selected_type]
+    st.dataframe(
+        flow,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+if app_view == "Quant Research":
+    st.title("📊 Quant Research Workspace")
+    st.caption(
+        "Cached multi-asset correlation and confirmation-delayed signal "
+        "backtesting for the saved watchlist."
+    )
+    correlation_tab, backtest_tab = st.tabs(
+        ["Cross-Asset Rolling Correlation", "Divergence Strategy Backtest"]
+    )
+    with correlation_tab:
+        render_correlation_workspace(st.session_state.watchlist)
+    with backtest_tab:
+        render_divergence_backtest(st.session_state.watchlist)
+
+
 if app_view == "Scanner Dashboard":
     st.title("📡 Watchlist Divergence Scanner")
     st.caption(
@@ -3233,6 +3823,13 @@ if app_view == "Scanner Dashboard":
     total_win_signals = 0
     total_triggered_signals = 0
     total_tickers = len(st.session_state.watchlist)
+    with st.spinner("Loading cached watchlist price histories..."):
+        scanner_histories, scanner_history_errors = fetch_batch_price_history(
+            tuple(st.session_state.watchlist),
+            period="1y",
+            interval="1d",
+        )
+    scan_errors.extend(scanner_history_errors)
     scan_progress = (
         st.progress(0, text="Scanning saved watchlist...")
         if total_tickers
@@ -3242,7 +3839,9 @@ if app_view == "Scanner Dashboard":
         st.session_state.watchlist, start=1
     ):
         try:
-            ticker_history = fetch_scanner_history(ticker_symbol)
+            ticker_history = scanner_histories.get(ticker_symbol)
+            if ticker_history is None or ticker_history.empty:
+                ticker_history = fetch_scanner_history(ticker_symbol)
             ticker_wins, ticker_signals = calculate_signal_win_rate(ticker_history)
             total_win_signals += ticker_wins
             total_triggered_signals += ticker_signals
@@ -4791,6 +5390,88 @@ if symbol and app_view == "Stock Analysis":
                     "Approach #2 保留既有情境估值、估值混合、基本面評分與下方計算明細；"
                     "Approach #1 為 FCFF/WACC 企業價值模型，Approach #3 為獨立的 ROA 調整 FCFE 模型。"
                 )
+                monte_carlo_result = simulate_dcf_intrinsic_values(
+                    base_revenue=annual_revenue,
+                    revenue_growth_rate=base_growth_rate,
+                    target_net_margin=target_net_margin,
+                    cash_flow_conversion_rate=cash_flow_conversion_rate,
+                    forecast_period=forecast_period,
+                    discount_rate=discount_rate,
+                    exit_multiple=exit_multiple,
+                    total_shares_outstanding=shares_out,
+                    terminal_growth_rate=base_term_g,
+                    terminal_value_eligible=stable_positive_fcf,
+                    iterations=1000,
+                )
+                monte_carlo_summary = summarize_monte_carlo(
+                    monte_carlo_result["values"],
+                    curr_price,
+                )
+                if monte_carlo_result["values"].size:
+                    st.markdown("#### Monte Carlo intrinsic-value distribution")
+                    monte_a, monte_b, monte_c, monte_d = st.columns(4)
+                    monte_a.metric(
+                        "Median fair value",
+                        f"${monte_carlo_summary['median']:.2f}",
+                    )
+                    monte_b.metric(
+                        "5th percentile",
+                        f"${monte_carlo_summary['var_5']:.2f}",
+                    )
+                    monte_c.metric(
+                        "95th percentile",
+                        f"${monte_carlo_summary['var_95']:.2f}",
+                        help="Central 90% model interval; the 5th percentile is the downside VaR boundary.",
+                    )
+                    monte_d.metric(
+                        "Probability above market",
+                        (
+                            f"{monte_carlo_summary['probability_above_price']:.1%}"
+                            if pd.notna(
+                                monte_carlo_summary["probability_above_price"]
+                            )
+                            else "N/A"
+                        ),
+                    )
+                    monte_figure = go.Figure()
+                    monte_figure.add_trace(
+                        go.Histogram(
+                            x=monte_carlo_result["values"],
+                            nbinsx=40,
+                            name="Simulated fair value",
+                            marker_color="#4C78A8",
+                            opacity=0.8,
+                        )
+                    )
+                    monte_figure.add_vline(
+                        x=curr_price,
+                        line_dash="dash",
+                        line_color="#E45756",
+                        annotation_text="Market price",
+                    )
+                    monte_figure.add_vline(
+                        x=monte_carlo_summary["median"],
+                        line_dash="dot",
+                        line_color="#54A24B",
+                        annotation_text="Median",
+                    )
+                    monte_figure.update_layout(
+                        height=320,
+                        margin=dict(l=20, r=20, t=25, b=20),
+                        xaxis_title="Intrinsic value per share ($)",
+                        yaxis_title="Simulation count",
+                    )
+                    st.plotly_chart(monte_figure, use_container_width=True)
+                    st.caption(
+                        "1,000 randomized FCFE valuations vary growth, discount "
+                        "rate, terminal growth and exit multiple. This is a model "
+                        "sensitivity distribution, not a statistical guarantee."
+                    )
+                else:
+                    st.info(
+                        "Monte Carlo valuation is unavailable because revenue, "
+                        "shares outstanding, or terminal assumptions are incomplete."
+                    )
 
                 pess_discount = discount_rate + 0.01
                 opt_discount = max(discount_rate - 0.008, 0.05)
@@ -5518,6 +6199,10 @@ if symbol and app_view == "Stock Analysis":
                             "70% Value Area High (VAH)",
                             f"${vah_price:.2f}" if vah_price is not None else "N/A",
                         )
+                        with st.expander(
+                            "Independent interactive chart preview", expanded=False
+                        ):
+                            render_chart_layout_fragment(df_hist, symbol)
 
                         st.markdown("#### 多時間週期趨勢與動能共振")
                         intraday_history = pd.DataFrame()
@@ -5673,7 +6358,15 @@ if symbol and app_view == "Stock Analysis":
 
                         st.markdown("#### Master & Technical Patterns Scanner")
                         if pattern_setups:
-                            pattern_table = pd.DataFrame(pattern_setups)
+                            pattern_table = pd.DataFrame(pattern_setups)[
+                                [
+                                    "類別",
+                                    "型態",
+                                    "信心分數",
+                                    "狀態",
+                                    "觀察依據",
+                                ]
+                            ]
                             st.dataframe(
                                 pattern_table.style.format({
                                     "信心分數": "{:.0f}%",
@@ -6073,12 +6766,22 @@ if symbol and app_view == "Stock Analysis":
             ):
                 fig_k = make_subplots(
                     rows=4,
-                    cols=1,
+                    cols=2,
                     shared_xaxes=True,
+                    shared_yaxes="rows",
                     vertical_spacing=0.025,
+                    horizontal_spacing=0.012,
                     row_heights=[0.50, 0.15, 0.15, 0.20],
+                    column_widths=[0.84, 0.16],
+                    specs=[
+                        [{}, {}],
+                        [{"colspan": 2}, None],
+                        [{"colspan": 2}, None],
+                        [{"colspan": 2}, None],
+                    ],
                     subplot_titles=(
                         "Price / Signal Turns / Divergences",
+                        "Volume by Price",
                         "MFI (14)",
                         "Order Flow Delta",
                         "CPD (Cumulative Volume Delta)",
@@ -6096,6 +6799,201 @@ if symbol and app_view == "Stock Analysis":
                     row=1,
                     col=1,
                 )
+                profile_centers, profile_volumes = calculate_volume_profile(df_hist)
+                if profile_centers.size and profile_volumes.size:
+                    profile_colors = [
+                        (
+                            "#FFD54F"
+                            if abs(price - poc_price)
+                            <= max(float(np.ptp(profile_centers)) / 48, 1e-9)
+                            else "#7E57C2"
+                            if val_price is not None
+                            and vah_price is not None
+                            and val_price <= price <= vah_price
+                            else "rgba(120, 144, 156, 0.65)"
+                        )
+                        for price in profile_centers
+                    ]
+                    fig_k.add_trace(
+                        go.Bar(
+                            x=profile_volumes,
+                            y=profile_centers,
+                            orientation="h",
+                            name="Volume Profile",
+                            marker_color=profile_colors,
+                            hovertemplate=(
+                                "Price: $%{y:.2f}<br>Volume: %{x:,.0f}"
+                                "<extra></extra>"
+                            ),
+                            showlegend=False,
+                        ),
+                        row=1,
+                        col=2,
+                    )
+                    fig_k.update_xaxes(
+                        title_text="Vol",
+                        showticklabels=False,
+                        row=1,
+                        col=2,
+                    )
+                    fig_k.add_hline(
+                        y=poc_price,
+                        line_color="#FFD54F",
+                        line_width=2,
+                        row=1,
+                        col=2,
+                    )
+                    if val_price is not None and vah_price is not None:
+                        for value_area_level in (val_price, vah_price):
+                            fig_k.add_hline(
+                                y=value_area_level,
+                                line_dash="dot",
+                                line_color="#CE93D8",
+                                line_width=1,
+                                row=1,
+                                col=2,
+                            )
+
+                pattern_scenarios = build_pattern_projection_scenarios(
+                    df_hist,
+                    pattern_setups,
+                )
+                scenario_colors = ["#26A69A", "#AB47BC", "#42A5F5", "#FFA726"]
+                for scenario_index, scenario in enumerate(pattern_scenarios):
+                    scenario_color = scenario_colors[
+                        scenario_index % len(scenario_colors)
+                    ]
+                    structure_points = scenario["points"]
+                    if structure_points:
+                        point_dates = [point[0] for point in structure_points]
+                        point_prices = [point[1] for point in structure_points]
+                        point_labels = [point[2] for point in structure_points]
+                        first_date = min(point_dates)
+                        last_date = max(point_dates)
+                        if first_date < last_date:
+                            fig_k.add_vrect(
+                                x0=first_date,
+                                x1=last_date,
+                                fillcolor=scenario_color,
+                                opacity=0.08,
+                                line_width=0,
+                                annotation_text=scenario["pattern"],
+                                annotation_position="top left",
+                                row=1,
+                                col=1,
+                            )
+                        fig_k.add_trace(
+                            go.Scatter(
+                                x=point_dates,
+                                y=point_prices,
+                                text=point_labels,
+                                mode="lines+markers+text",
+                                textposition="bottom center",
+                                name=f"{scenario['pattern']} swing points",
+                                line=dict(color=scenario_color, width=2, dash="dot"),
+                                marker=dict(
+                                    color=scenario_color,
+                                    size=11,
+                                    symbol="diamond",
+                                    line=dict(color="white", width=1),
+                                ),
+                                hovertemplate=(
+                                    "%{text}<br>%{x|%Y-%m-%d}<br>"
+                                    "$%{y:.2f}<extra></extra>"
+                                ),
+                            ),
+                            row=1,
+                            col=1,
+                        )
+
+                    current_date = pd.Timestamp(df_hist.index[-1])
+                    projection_dates = [
+                        current_date,
+                        current_date + pd.offsets.BDay(14),
+                        current_date + pd.offsets.BDay(30),
+                    ]
+                    upper_values = [
+                        scenario["current_price"],
+                        max(
+                            scenario["current_price"],
+                            scenario["breakout_level"],
+                        ),
+                        max(
+                            scenario["current_price"],
+                            scenario["measured_target"],
+                        ),
+                    ]
+                    lower_values = [
+                        scenario["current_price"],
+                        scenario["lower_14"],
+                        scenario["lower_30"],
+                    ]
+                    scenario_label = (
+                        f"{scenario['pattern']} · "
+                        f"{'triggered' if scenario['status'] == '突破觸發' else 'forming'}"
+                    )
+                    fig_k.add_trace(
+                        go.Scatter(
+                            x=projection_dates,
+                            y=upper_values,
+                            mode="lines+markers",
+                            name=f"{scenario_label} Expected Target Path",
+                            line=dict(color=scenario_color, width=2, dash="dash"),
+                            marker=dict(size=7),
+                            hovertemplate=(
+                                "%{x|%Y-%m-%d}<br>Expected target path: "
+                                "$%{y:.2f}<extra></extra>"
+                            ),
+                        ),
+                        row=1,
+                        col=1,
+                    )
+                    fig_k.add_trace(
+                        go.Scatter(
+                            x=projection_dates,
+                            y=lower_values,
+                            mode="lines+markers",
+                            name=f"{scenario_label} Structural Stop-Loss / ATR Envelope",
+                            line=dict(
+                                color=scenario_color,
+                                width=1.5,
+                                dash="dot",
+                            ),
+                            marker=dict(size=6),
+                            fill="tonexty",
+                            fillcolor="rgba(120, 144, 156, 0.12)",
+                            hovertemplate=(
+                                "%{x|%Y-%m-%d}<br>Structural stop / ATR "
+                                "envelope: $%{y:.2f}<extra></extra>"
+                            ),
+                        ),
+                        row=1,
+                        col=1,
+                    )
+                    fig_k.add_hline(
+                        y=scenario["measured_target"],
+                        line_dash="dash",
+                        line_color=scenario_color,
+                        opacity=0.55,
+                        annotation_text=(
+                            f"{scenario['pattern']} measured move "
+                            f"${scenario['measured_target']:.2f}"
+                        ),
+                        row=1,
+                        col=1,
+                    )
+                    fig_k.add_hline(
+                        y=scenario["structure_stop"],
+                        line_dash="dot",
+                        line_color=scenario_color,
+                        opacity=0.45,
+                        annotation_text=(
+                            f"{scenario['pattern']} structural ATR stop "
+                            f"${scenario['structure_stop']:.2f}"
+                        ),
+                        row=1,
+                        col=1,
+                    )
                 fig_k.add_trace(
                     go.Scatter(
                         x=df_hist.index,
@@ -6449,9 +7347,46 @@ if symbol and app_view == "Stock Analysis":
                 fig_k.update_layout(
                     height=900,
                     xaxis_rangeslider_visible=False,
-                    margin=dict(t=35, b=20),
+                    margin=dict(t=45, b=20),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
                 )
                 st.plotly_chart(fig_k, use_container_width=True)
+                st.caption(
+                    "**Geometric Measured Move Scenarios / ATR Envelopes** — "
+                    "14/30 trading-day scenario paths use detected pattern pivots "
+                    "and ATR(14); measured move = breakout pivot + structure depth. "
+                    "These are geometric scenarios, not predictions. Breakout "
+                    "confirmation requires a closing-price breakout, volume "
+                    "expansion, and `Signal_Hist_Turn == True`."
+                )
+                if pattern_scenarios:
+                    scenario_summary = pd.DataFrame([
+                        {
+                            "Pattern": item["pattern"],
+                            "Status": item["status"],
+                            "Confidence": item["confidence"],
+                            "Breakout / Resistance": item["breakout_level"],
+                            "Structure Low": item["structure_low"],
+                            "Measured Move Target": item["measured_target"],
+                            "14D ATR Envelope Low": item["lower_14"],
+                            "30D ATR Envelope Low": item["lower_30"],
+                            "Structural ATR Stop": item["structure_stop"],
+                        }
+                        for item in pattern_scenarios
+                    ])
+                    st.dataframe(
+                        scenario_summary.style.format({
+                            "Confidence": "{:.0f}%",
+                            "Breakout / Resistance": "${:.2f}",
+                            "Structure Low": "${:.2f}",
+                            "Measured Move Target": "${:.2f}",
+                            "14D ATR Envelope Low": "${:.2f}",
+                            "30D ATR Envelope Low": "${:.2f}",
+                            "Structural ATR Stop": "${:.2f}",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
             elif not df_hist.empty:
                 st.info("Advanced price-volume indicators are unavailable for this ticker.")
 
@@ -6719,6 +7654,8 @@ if symbol and app_view == "Stock Analysis":
                         use_container_width=True,
                         hide_index=True,
                     )
+                with st.expander("Filter unusual flow by expiry and contract type"):
+                    render_options_flow_filter(options_summary)
                 st.info(
                     "🤖 **AI Flow Interpretation**："
                     f" {interpret_options_flow(options_summary)}"
