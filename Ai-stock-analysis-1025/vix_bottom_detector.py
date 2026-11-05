@@ -116,6 +116,53 @@ def render_vix_bottom_ui():
     else:
         st.success(f"🟢 Quant Bottom Confirmed / Resolution Cross — {message}")
 
+    with st.expander("How to interpret this detector"):
+        st.markdown(
+            """
+            **What these indicators measure**
+
+            - **VIX** estimates expected S&P 500 volatility over roughly the
+              next 30 days. A higher reading means options are pricing in
+              larger near-term moves, not a particular market direction.
+            - **VIX3M** measures expected volatility over roughly the next
+              three months. Comparing VIX with VIX3M puts near-term fear in
+              context with the longer-term volatility outlook.
+            - **VVIX** tracks expected volatility of the VIX itself. A falling
+              VVIX can indicate that demand for volatility protection is
+              easing, but it does not confirm that prices have bottomed.
+
+            **How to read the ratio and status**
+
+            - **VIX / VIX3M >= 1.0 — Backwardation:** near-term implied
+              volatility is at least as high as three-month implied
+              volatility. The detector flags this as a liquidity-flush risk.
+            - **Ratio < 1.0 — Contango:** the immediate backwardation
+              condition has cleared. This alone is not a bottom signal.
+            - **Quant Bottom Confirmed:** the ratio is below 1.0 and the latest
+              VVIX is more than 10% below its highest reading in the latest
+              five observations. This is the detector's resolution-cross rule.
+            - **Bottom Formation:** backwardation has cleared, but VVIX has
+              not yet met that five-observation decline condition.
+
+            **Chart guide:** the top panel plots the VIX/VIX3M ratio; the red
+            dashed line marks 1.0. The lower panel compares the VIX and VIX3M
+            levels over the selected six-month data window.
+
+            **Important:** these are mechanical heuristics, not a forecast or
+            a guarantee of a market bottom. They do not account for price
+            trends, portfolio needs, transaction costs, or your risk
+            tolerance. Validate signals independently and do not treat the
+            allocation language above as personalized financial advice.
+            """
+        )
+        st.caption(
+            f"Current check: ratio {latest_ratio:.3f} "
+            f"({'backwardation' if latest_ratio >= 1.0 else 'contango'}); "
+            f"latest VVIX {latest_vvix:.2f}; five-observation VVIX high "
+            f"{five_day_max_vvix:.2f}; 90% threshold "
+            f"{five_day_max_vvix * 0.9:.2f}."
+        )
+
     figure = make_subplots(
         rows=2,
         cols=1,
