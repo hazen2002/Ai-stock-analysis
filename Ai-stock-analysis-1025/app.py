@@ -299,8 +299,8 @@ if st.session_state.get("watchlist_revision") != WATCHLIST_REVISION:
 
 @st.fragment
 def render_watchlist_controls():
-    st.sidebar.title("⭐ Watchlist Manager")
-    with st.sidebar.form("watchlist_add_form"):
+    st.title("⭐ Watchlist Manager")
+    with st.form("watchlist_add_form"):
         new_symbol = (
             st.text_input("Stock ticker", key="new_watchlist_symbol").strip().upper()
         )
@@ -310,7 +310,7 @@ def render_watchlist_controls():
         save_watchlist(st.session_state.watchlist)
         st.rerun(scope="fragment")
 
-    with st.sidebar.expander(f"Saved tickers ({len(st.session_state.watchlist)})"):
+    with st.expander(f"Saved tickers ({len(st.session_state.watchlist)})"):
         if st.session_state.watchlist:
             st.dataframe(
                 pd.DataFrame({"Ticker": st.session_state.watchlist}),
@@ -334,10 +334,11 @@ def render_watchlist_controls():
                 st.rerun(scope="fragment")
         else:
             st.caption("The watchlist is empty.")
-    st.sidebar.caption("Only saved tickers are scanned.")
+    st.caption("Only saved tickers are scanned.")
 
 
-render_watchlist_controls()
+with st.sidebar:
+    render_watchlist_controls()
 
 
 def get_seasonal_roadmap_context(today=None):
@@ -3612,9 +3613,7 @@ def render_correlation_workspace(saved_tickers):
     else:
         st.markdown(f"##### Latest {window}-day rolling return correlation")
         st.dataframe(
-            matrix.style.format("{:.2f}").background_gradient(
-                cmap="RdYlGn", vmin=-1, vmax=1
-            ),
+            matrix.style.format("{:.2f}"),
             use_container_width=True,
         )
 
