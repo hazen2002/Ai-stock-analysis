@@ -22,6 +22,7 @@ from utils.fundamentals import (
     next_earnings_date,
 )
 from utils.valuation import simulate_dcf_intrinsic_values, summarize_monte_carlo
+from vix_bottom_detector import render_vix_bottom_ui
 
 # Page Configuration
 st.set_page_config(
@@ -381,11 +382,15 @@ app_view = st.radio(
         "Stock Analysis",
         "💼 Portfolio & Secondary Allocator",
         "Quant Research",
+        "⚡ VIX Bottom Detector",
     ],
     horizontal=True,
     key="app_view",
 )
 selected_from_watchlist = "-- Select --"
+if app_view == "⚡ VIX Bottom Detector":
+    render_vix_bottom_ui()
+
 if app_view == "Stock Analysis":
     st.title("⚡ Livermore & Lynch 機構級股票分析平台")
     banner_style, banner_message = get_seasonal_roadmap_context()
