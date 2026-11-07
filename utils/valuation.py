@@ -39,7 +39,7 @@ def simulate_dcf_intrinsic_values(
             "probability_above_price": np.nan,
         }
 
-    periods = max(1, int(_finite_float(forecast_period, 1)))
+    periods = int(np.clip(_finite_float(forecast_period, 1), 1, 50))
     growth_center = float(
         np.clip(_finite_float(revenue_growth_rate), -0.50, 1.0)
     )
@@ -85,9 +85,9 @@ def simulate_dcf_intrinsic_values(
         25.0,
     )
 
-    projected_revenue = np.full(iterations, revenue, dtype=float)
-    present_value = np.zeros(iterations, dtype=float)
-    final_fcfe = np.zeros(iterations, dtype=float)
+    projected_revenue = np.full(iteration_count, revenue, dtype=float)
+    present_value = np.zeros(iteration_count, dtype=float)
+    final_fcfe = np.zeros(iteration_count, dtype=float)
     for year in range(1, periods + 1):
         projected_revenue *= 1.0 + growth_draws
         final_fcfe = projected_revenue * margin * conversion

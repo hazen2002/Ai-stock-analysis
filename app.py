@@ -3,6 +3,7 @@ import datetime
 import urllib.request
 from pathlib import Path
 import time
+import concurrent.futures
 import requests
 import numpy as np
 import pandas as pd
@@ -11,6 +12,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
+from yfinance import EquityQuery
 from ta_utils import calculate_synchronized_macd
 from utils.quant import (
     backtest_signal_strategy,
@@ -390,7 +392,7 @@ app_view = st.radio(
 )
 selected_from_watchlist = "-- Select --"
 if app_view == "⚡ VIX Bottom Detector":
-    render_vix_bottom_ui()
+    render_vix_bottom_ui(st.session_state.watchlist)
 
 if app_view == "Stock Analysis":
     st.title("⚡ Livermore & Lynch 機構級股票分析平台")
@@ -1198,6 +1200,161 @@ def get_granular_industry_benchmarks(industry_str, sector_str):
         }
 
 
+@st.cache_data(ttl=datetime.timedelta(hours=12), show_spinner=False)
+def fetch_market_cap_matched_peers(
+    symbol,
+    industry,
+    sector,
+    market_cap,
+    candidates_per_screen=250,
+    max_peer_profiles=18,
+):
+    """Find same-sector, same-industry peers with comparable market values."""
+    target_cap = _finite_float(market_cap, np.nan)
+    if not industry or not sector or not np.isfinite(target_cap) or target_cap <= 0:
+        return {"peers": [], "errors": ["Target industry, sector, or market cap is unavailable."]}
+
+    try:
+        cap_floor = target_cap * 0.50
+        cap_ceiling = target_cap * 2.00
+        query = EquityQuery(
+            "AND",
+            [
+                EquityQuery("EQ", ["sector", sector]),
+                EquityQuery(
+                    "BTWN",
+                    ["intradaymarketcap", cap_floor, cap_ceiling],
+                ),
+            ],
+        )
+        response = yf.screen(
+            query,
+            count=candidates_per_screen,
+            sortField="intradaymarketcap",
+            sortAsc=False,
+        )
+    except Exception as error:
+        return {"peers": [], "errors": [f"Yahoo Finance screener: {error}"]}
+
+    quotes = response.get("quotes", []) if isinstance(response, dict) else []
+    target_symbol = to_yfinance_symbol(symbol).upper()
+    candidates = []
+    seen_symbols = {target_symbol}
+    for quote in quotes:
+        if not isinstance(quote, dict):
+            continue
+        candidate_symbol = str(quote.get("symbol") or "").upper()
+        candidate_cap = _finite_float(quote.get("marketCap"), np.nan)
+        if (
+            not candidate_symbol
+            or candidate_symbol in seen_symbols
+            or not np.isfinite(candidate_cap)
+            or candidate_cap < cap_floor
+            or candidate_cap > cap_ceiling
+        ):
+            continue
+        seen_symbols.add(candidate_symbol)
+        candidates.append((candidate_symbol, candidate_cap))
+
+    candidates.sort(
+        key=lambda item: abs(np.log(item[1] / target_cap))
+    )
+    candidates = candidates[:max_peer_profiles]
+    if not candidates:
+        return {"peers": [], "errors": []}
+
+    def fetch_profile(candidate):
+        candidate_symbol, quoted_market_cap = candidate
+        try:
+            profile = yf.Ticker(candidate_symbol).info
+        except Exception as error:
+            return None, f"{candidate_symbol}: profile unavailable: {error}"
+        candidate_industry = str(profile.get("industry") or "").strip().casefold()
+        candidate_sector = str(profile.get("sector") or "").strip().casefold()
+        if (
+            candidate_industry != str(industry).strip().casefold()
+            or candidate_sector != str(sector).strip().casefold()
+        ):
+            return None, None
+        profile_cap = _finite_float(
+            profile.get("marketCap", quoted_market_cap),
+            quoted_market_cap,
+        )
+        if profile_cap < cap_floor or profile_cap > cap_ceiling:
+            return None, None
+        profile["symbol"] = candidate_symbol
+        profile["marketCap"] = profile_cap
+        return profile, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        profile_results = list(executor.map(fetch_profile, candidates))
+
+    peers = []
+    errors = []
+    seen_names = set()
+    for profile, error in profile_results:
+        if error:
+            errors.append(error)
+        if not profile:
+            continue
+        company_name = str(
+            profile.get("shortName") or profile.get("longName") or profile["symbol"]
+        )
+        identity = company_name.casefold()
+        if identity in seen_names:
+            continue
+        seen_names.add(identity)
+        peers.append({
+            "symbol": profile["symbol"],
+            "company": company_name,
+            "market_cap": profile["marketCap"],
+            "pe": _finite_float(
+                profile.get("forwardPE") or profile.get("trailingPE"),
+                np.nan,
+            ),
+            "ps": _finite_float(
+                profile.get("priceToSalesTrailing12Months"),
+                np.nan,
+            ),
+            "peg": _finite_float(profile.get("pegRatio"), np.nan),
+            "gross_margin": _finite_float(profile.get("grossMargins"), np.nan),
+            "net_margin": _finite_float(profile.get("profitMargins"), np.nan),
+            "roe": _finite_float(profile.get("returnOnEquity"), np.nan),
+            "revenue_growth": _finite_float(profile.get("revenueGrowth"), np.nan),
+        })
+    peers.sort(key=lambda peer: abs(np.log(peer["market_cap"] / target_cap)))
+    return {"peers": peers[:5], "errors": errors}
+
+
+def build_peer_benchmark_summary(peers):
+    metric_names = {
+        "PE": "pe",
+        "PS": "ps",
+        "PEG": "peg",
+        "GM": "gross_margin",
+        "NM": "net_margin",
+        "ROE": "roe",
+        "RevenueGrowth": "revenue_growth",
+    }
+    summary = {}
+    for benchmark_key, peer_key in metric_names.items():
+        values = np.asarray(
+            [peer[peer_key] for peer in peers],
+            dtype=float,
+        )
+        values = values[np.isfinite(values)]
+        if benchmark_key in {"PE", "PS", "PEG"}:
+            values = values[values > 0]
+        if values.size:
+            average = float(np.mean(values))
+            summary[benchmark_key] = (
+                average * 100.0
+                if benchmark_key in {"GM", "NM", "ROE", "RevenueGrowth"}
+                else average
+            )
+    return summary
+
+
 def get_industry_growth_profile(industry_str, sector_str):
     ind = (industry_str or "").lower()
     sec = (sector_str or "").lower()
@@ -1406,16 +1563,18 @@ def calculate_fcfe_dcf(
     terminal_growth_rate=0.0,
     terminal_value_eligible=True,
 ):
-    revenue = max(float(base_revenue), 0.0)
-    growth_rate = max(-0.50, min(float(revenue_growth_rate), 1.00))
-    net_margin = max(0.0, min(float(target_net_margin), 1.00))
-    conversion_rate = max(0.0, min(float(cash_flow_conversion_rate), 2.00))
-    years = max(1, int(forecast_period))
-    discount = float(discount_rate)
+    revenue = max(_finite_float(base_revenue), 0.0)
+    growth_rate = float(np.clip(_finite_float(revenue_growth_rate), -0.50, 1.00))
+    net_margin = float(np.clip(_finite_float(target_net_margin), 0.0, 1.00))
+    conversion_rate = float(
+        np.clip(_finite_float(cash_flow_conversion_rate), 0.0, 2.00)
+    )
+    years = int(np.clip(_finite_float(forecast_period, 1), 1, 50))
+    discount = _finite_float(discount_rate, 0.09)
     if discount > 1.0:
         discount /= 100.0
-    discount = max(0.01, min(discount, 0.50))
-    shares = max(float(total_shares_outstanding), 0.0)
+    discount = float(np.clip(discount, 0.01, 0.50))
+    shares = max(_finite_float(total_shares_outstanding), 0.0)
 
     yearly_projections = []
     present_value_total = 0.0
@@ -1434,12 +1593,20 @@ def calculate_fcfe_dcf(
         })
 
     final_fcfe = yearly_projections[-1]["FCFE"]
-    terminal_growth = max(
-        0.0, min(float(terminal_growth_rate), 0.03, discount - 0.01)
+    terminal_growth = float(
+        np.clip(
+            _finite_float(terminal_growth_rate),
+            0.0,
+            min(0.03, discount - 0.01),
+        )
     )
     if terminal_value_eligible and final_fcfe > 0 and discount > terminal_growth:
         sustainable_multiple = (1.0 + terminal_growth) / (discount - terminal_growth)
-        multiple = min(max(0.0, float(exit_multiple)), sustainable_multiple, 25.0)
+        multiple = min(
+            max(0.0, _finite_float(exit_multiple)),
+            sustainable_multiple,
+            25.0,
+        )
         terminal_value = final_fcfe * multiple
     else:
         multiple = 0.0
@@ -1447,8 +1614,9 @@ def calculate_fcfe_dcf(
     present_value_terminal = terminal_value / ((1.0 + discount) ** years)
     total_present_value = present_value_total + present_value_terminal
     value_per_share = total_present_value / shares if shares > 0 else 0.0
+    current_price = _finite_float(current_stock_price)
     valuation_difference = (
-        ((float(current_stock_price) - value_per_share) / value_per_share) * 100
+        ((current_price - value_per_share) / value_per_share) * 100
         if value_per_share > 0
         else 0.0
     )
@@ -1487,7 +1655,7 @@ def calculate_traditional_fcff_dcf(
 ):
     base_fcf = max(_finite_float(base_fcf), 0.0)
     shares = max(_finite_float(total_shares_outstanding), 0.0)
-    years = max(1, int(forecast_period))
+    years = int(np.clip(_finite_float(forecast_period, 5), 1, 50))
     discount = _finite_float(discount_rate)
     if discount > 1.0:
         discount /= 100.0
@@ -1496,8 +1664,9 @@ def calculate_traditional_fcff_dcf(
     if discount <= terminal_growth:
         discount = min(0.50, terminal_growth + 0.01)
 
+    historical_values = [] if fcf_history is None else list(fcf_history)
     historical_fcf = [
-        _finite_float(value, np.nan) for value in (fcf_history or [])
+        _finite_float(value, np.nan) for value in historical_values
     ]
     historical_growth = [
         current / previous - 1.0
@@ -1634,9 +1803,10 @@ def calculate_roa_adjusted_dcf(
     benchmark = max(_finite_float(industry_roa_benchmark, 0.05), 0.005)
     roa_numeric = _finite_float(roa, np.nan)
     valid_roa = roa_numeric if np.isfinite(roa_numeric) else None
+    historical_values = [] if historical_roa is None else list(historical_roa)
     history = [
         value
-        for value in (_finite_float(item, np.nan) for item in (historical_roa or []))
+        for value in (_finite_float(item, np.nan) for item in historical_values)
         if np.isfinite(value)
     ][-5:]
     if valid_roa is None:
@@ -2557,9 +2727,21 @@ def build_pattern_projection_scenarios(history, patterns, atr_period=14):
     required = {"High", "Low", "Close"}
     if history.empty or not required.issubset(history.columns):
         return []
-    high = pd.to_numeric(history["High"], errors="coerce")
-    low = pd.to_numeric(history["Low"], errors="coerce")
-    close = pd.to_numeric(history["Close"], errors="coerce")
+    data = history.sort_index().loc[:, sorted(required)].copy()
+    for column in required:
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+    data = data.replace([np.inf, -np.inf], np.nan).dropna(subset=list(required))
+    data = data.loc[
+        (data["High"] > 0)
+        & (data["Low"] > 0)
+        & (data["Close"] > 0)
+        & (data["High"] >= data["Low"])
+    ]
+    if data.empty:
+        return []
+    high = data["High"]
+    low = data["Low"]
+    close = data["Close"]
     previous_close = close.shift(1)
     true_range = pd.concat(
         [
@@ -2569,9 +2751,10 @@ def build_pattern_projection_scenarios(history, patterns, atr_period=14):
         ],
         axis=1,
     ).max(axis=1)
-    atr_values = true_range.rolling(atr_period, min_periods=1).mean()
+    atr_window = max(1, int(_finite_float(atr_period, 14)))
+    atr_values = true_range.rolling(atr_window, min_periods=1).mean()
     atr = float(atr_values.iloc[-1]) if not atr_values.empty else 0.0
-    current_price = float(close.iloc[-1]) if not close.empty else 0.0
+    current_price = float(close.iloc[-1])
     if not np.isfinite(atr) or atr <= 0 or current_price <= 0:
         return []
 
@@ -2637,12 +2820,21 @@ def find_chart_pattern_setups(
     required = {"High", "Low", "Close", "Volume"}
     if history.empty or not required.issubset(history.columns):
         return []
-    data = (
-        history.sort_index()
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna(subset=list(required))
-        .copy()
+    data = history.sort_index().loc[:, sorted(required)].copy()
+    for column in required:
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+    data = data.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=list(required)
     )
+    valid_prices = (
+        (data["High"] > 0)
+        & (data["Low"] > 0)
+        & (data["Close"] > 0)
+        & (data["High"] >= data["Low"])
+        & (data["Volume"] >= 0)
+    )
+    data = data.loc[valid_prices]
+    data = data.loc[~data.index.duplicated(keep="last")]
     if len(data) < 30:
         return []
     high = pd.to_numeric(data["High"], errors="coerce")
@@ -3269,6 +3461,89 @@ def get_pattern_decision_guide(pattern_name):
             "bullish",
         ),
     )
+
+
+def get_pattern_plain_english_summary(pattern_name, pattern_status):
+    """Translate technical pattern context into a concise, conditional action note."""
+    summaries = {
+        "Livermore Pivotal Point / Shakeout": (
+            "價格曾短暫跌破支撐又收回，代表低位有承接；等收復 pivot 並確認量能，"
+            "再考慮偏多，不要只因一次下影線追進。"
+        ),
+        "Minervini Volatility Contraction Pattern (VCP)": (
+            "回檔幅度逐步縮小，賣壓可能減弱；等最後整理區帶量突破再評估進場，"
+            "並以收縮低點規劃風險。"
+        ),
+        "Lynch Growth & Earnings Line": (
+            "目前是在檢查成長是否值得其價格，不是直接買入訊號；先核對獲利品質，"
+            "再等待價格型態給出獨立觸發。"
+        ),
+        "Head & Shoulders Top": (
+            "股價形成高點與兩肩後，若收盤跌破頸線，賣壓可能接管；未跌破前先觀察，"
+            "若觸發則預先界定右肩上方風險。"
+        ),
+        "Inverse Head & Shoulders": (
+            "低位賣壓可能逐步耗盡；等收盤站上頸線並有量能確認，再考慮偏多，"
+            "不要把尚未突破的底部形狀當成反轉已成立。"
+        ),
+        "Double Top": (
+            "股價兩度衝高失敗，若帶量跌破中間頸線，代表賣壓湧現，可考慮偏空操作，"
+            "停損設在近期高點上方。"
+        ),
+        "Triple Top": (
+            "多次上攻同一壓力都受阻；只有支撐／頸線有效跌破後才偏空，"
+            "並以最近高點作風險參考。"
+        ),
+        "Double Bottom": (
+            "股價兩次測試低位都有承接；等中間反彈高點被有效突破，再考慮偏多，"
+            "並把第二個低點附近視為風險區。"
+        ),
+        "Triple Bottom": (
+            "多次回測支撐都出現承接；等待區間上沿突破確認買方勝出，"
+            "未突破前仍可能只是盤整。"
+        ),
+        "Rounding Bottom": (
+            "低點後的回升較緩，可能是賣壓逐步減弱；等杯口／阻力突破確認，"
+            "避免在價格仍於底部區間時預判反轉。"
+        ),
+        "Cup and Handle": (
+            "價格完成弧形回升後正在整理；等把手上沿／杯口突破再評估偏多，"
+            "並留意突破是否伴隨成交量。"
+        ),
+        "Bull Flag": (
+            "一段急漲後正在短暫整理；若收盤突破旗形上沿，可觀察多方延續，"
+            "跌破整理低點則代表原先假設轉弱。"
+        ),
+        "Bear Flag": (
+            "一段急跌後反彈整理；若收盤跌破旗形下沿，空方可能延續，"
+            "未跌破前不把反彈整理直接視為續跌訊號。"
+        ),
+        "Rectangle / Darvas Box": (
+            "股價在箱體內來回，方向尚未確定；等收盤突破箱頂或跌破箱底，"
+            "再依突破方向評估，不在區間中央猜方向。"
+        ),
+        "Ascending Triangle": (
+            "阻力大致水平而低點墊高，買方承接力改善；等收盤突破上沿並確認量能，"
+            "再考慮偏多。"
+        ),
+        "Descending Triangle": (
+            "支撐大致水平而高點降低，賣方壓力增加；等收盤跌破下沿確認，"
+            "不要在支撐仍有效時提前追空。"
+        ),
+        "Symmetrical Triangle": (
+            "高點降低、低點抬高，代表波幅收斂但方向未明；等待上破或下破後再跟隨，"
+            "不要預設多空。"
+        ),
+    }
+    summary = summaries.get(pattern_name)
+    if summary:
+        return summary
+    status_text = (
+        "價格條件已觸發，仍要確認量能與風險"
+        if pattern_status == "突破觸發"
+        else "型態仍在形成，先等待價格確認"
+    )
+    return f"{pattern_name} 提供的是供需線索；{status_text}，不要只靠型態名稱下單。"
 
 
 def calculate_timeframe_confluence(daily_history, hourly_history):
@@ -4789,14 +5064,62 @@ if symbol and app_view == "Stock Analysis":
             ind_category_name, ind_benchmarks = get_granular_industry_benchmarks(
                 raw_industry, raw_sector
             )
+            peer_result = fetch_market_cap_matched_peers(
+                symbol=symbol,
+                industry=raw_industry,
+                sector=raw_sector,
+                market_cap=info.get("marketCap"),
+            )
+            peer_companies = peer_result["peers"]
+            peer_averages = build_peer_benchmark_summary(peer_companies)
+            peer_average_available = len(peer_companies) >= 2
+            if peer_average_available:
+                ind_benchmarks.update({
+                    key: peer_averages[key]
+                    for key in ("PE", "PS", "PEG", "GM", "NM", "ROE")
+                    if key in peer_averages
+                })
 
             st.caption(
                 f"📌 **細分產業類別**：`{raw_industry or raw_sector}` ➔ 定義為"
                 f" **{ind_category_name}**\n📊 **同業基準參考**：P/E:"
-                f" {ind_benchmarks['PE']}x | P/S: {ind_benchmarks['PS']}x | PEG:"
-                f" {ind_benchmarks['PEG']}x | 毛利率: {ind_benchmarks['GM']}% |"
-                f" 淨利率: {ind_benchmarks['NM']}% | ROE: {ind_benchmarks['ROE']}%"
+                f" {ind_benchmarks['PE']:.1f}x | P/S: {ind_benchmarks['PS']:.1f}x | PEG:"
+                f" {ind_benchmarks['PEG']:.1f}x | 毛利率: {ind_benchmarks['GM']:.1f}% |"
+                f" 淨利率: {ind_benchmarks['NM']:.1f}% | ROE: {ind_benchmarks['ROE']:.1f}%"
             )
+            if peer_average_available:
+                peer_names = ", ".join(
+                    f"{peer['company']} ({peer['symbol']})"
+                    for peer in peer_companies
+                )
+                peer_growth = peer_averages.get("RevenueGrowth")
+                target_growth = _finite_float(info.get("revenueGrowth"), np.nan)
+                growth_comparison = (
+                    f" | 標的近期營收成長：{target_growth * 100:.1f}%"
+                    if np.isfinite(target_growth)
+                    else ""
+                )
+                peer_growth_text = (
+                    f"{peer_growth:.1f}%"
+                    if peer_growth is not None
+                    else "資料不足"
+                )
+                st.caption(
+                    f"🔎 **市值相近、同細分產業實際對標平均（n={len(peer_companies)}）**"
+                    f" | 同業近期營收成長均值：{peer_growth_text}"
+                    f"{growth_comparison}"
+                )
+                st.caption(f"對標公司：{peer_names}")
+            else:
+                st.caption(
+                    "⚪ Yahoo Finance 未取得至少兩家符合相同細分產業與市值範圍的對標公司；"
+                    "目前顯示既有產業參考值，不將其標示為實際同業平均。"
+                )
+            if peer_result["errors"]:
+                st.caption(
+                    f"對標資料擷取有 {len(peer_result['errors'])} 項錯誤；"
+                    f"範例：{peer_result['errors'][0]}"
+                )
 
             if not bs.empty and not fin.empty:
                 try:
@@ -6616,6 +6939,10 @@ if symbol and app_view == "Stock Analysis":
                                     actionable_trigger,
                                     pattern_direction,
                                 ) = get_pattern_decision_guide(pattern["型態"])
+                                plain_english_summary = get_pattern_plain_english_summary(
+                                    pattern["型態"],
+                                    pattern["狀態"],
+                                )
                                 atr_amount = (
                                     atr_risk["atr"] if atr_risk else 0.0
                                 )
@@ -6666,6 +6993,10 @@ if symbol and app_view == "Stock Analysis":
                                     f"{pattern['型態']} — {pattern['狀態']} "
                                     f"({pattern['信心分數']}%)"
                                 ):
+                                    st.info(
+                                        f"💬 **白話解讀 / Plain English**："
+                                        f"{plain_english_summary}"
+                                    )
                                     st.markdown(
                                         f"**結構意義：** {structure_explanation}"
                                     )
