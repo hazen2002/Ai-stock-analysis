@@ -392,7 +392,7 @@ app_view = st.radio(
 )
 selected_from_watchlist = "-- Select --"
 if app_view == "⚡ VIX Bottom Detector":
-    render_vix_bottom_ui(st.session_state.watchlist)
+    render_vix_bottom_ui()
 
 if app_view == "Stock Analysis":
     st.title("⚡ Livermore & Lynch 機構級股票分析平台")

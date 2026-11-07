@@ -222,7 +222,8 @@ def render_event_horizon(watchlist, liquidity_flush, cash_locked):
         )
 
 
-def render_vix_bottom_ui(watchlist=None):
+def render_vix_bottom_ui():
+    watchlist = st.session_state.get("watchlist", [])
     st.title("⚡ Macro & Volatility Correlation Matrix")
     st.caption(
         "三年期宏觀風險、波動率期限結構與跨資產趨勢追蹤。"
