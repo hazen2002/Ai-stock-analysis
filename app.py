@@ -16,7 +16,6 @@ from yfinance import EquityQuery
 from ta_utils import calculate_synchronized_macd
 from utils.quant import (
     backtest_signal_strategy,
-    fit_trade_return_regression,
     rolling_correlation_history,
     rolling_correlation_matrix,
 )
@@ -3934,6 +3933,41 @@ def fetch_quant_backtest_history(symbol, period="2y", interval="1d"):
         interval=interval,
         timeout=15,
     )
+
+
+def fit_trade_return_regression(x_values, y_values):
+    """Fit a linear OLS trend when the trade sample supports a stable fit."""
+    x = np.asarray(x_values, dtype=float).reshape(-1)
+    y = np.asarray(y_values, dtype=float).reshape(-1)
+    if x.size != y.size:
+        raise ValueError("Regression x and y values must have matching lengths.")
+
+    valid = np.isfinite(x) & np.isfinite(y)
+    x = x[valid]
+    y = y[valid]
+    if len(x) < 4 or np.unique(x).size < 3 or np.unique(y).size < 2:
+        return None
+
+    x_center = float(x.mean())
+    x_scale = float(x.std())
+    total_sum = float(np.sum((y - y.mean()) ** 2))
+    if not np.isfinite(x_scale) or x_scale == 0 or total_sum == 0:
+        return None
+
+    scaled_x = (x - x_center) / x_scale
+    design = np.column_stack((scaled_x, np.ones_like(scaled_x)))
+    coefficients, _, rank, _ = np.linalg.lstsq(design, y, rcond=None)
+    if rank != 2 or not np.isfinite(coefficients).all():
+        return None
+
+    residual_sum = float(np.sum((y - design @ coefficients) ** 2))
+    fitted_x = np.linspace(float(x.min()), float(x.max()), 100)
+    fitted_y = coefficients[0] * ((fitted_x - x_center) / x_scale) + coefficients[1]
+    return {
+        "x": fitted_x,
+        "y": fitted_y,
+        "r_squared": 1.0 - residual_sum / total_sum,
+    }
 
 
 @st.fragment
