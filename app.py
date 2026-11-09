@@ -16,6 +16,7 @@ from yfinance import EquityQuery
 from ta_utils import calculate_synchronized_macd
 from utils.quant import (
     backtest_signal_strategy,
+    fit_trade_return_regression,
     rolling_correlation_history,
     rolling_correlation_matrix,
 )
@@ -3925,25 +3926,61 @@ def render_correlation_workspace(saved_tickers):
         st.info("Select two symbols with overlapping trading history.")
 
 
+@st.cache_data(ttl=datetime.timedelta(hours=1), show_spinner=False)
+def fetch_quant_backtest_history(symbol, period="2y", interval="1d"):
+    """Fetch cached OHLCV history for the Quant Research backtest."""
+    return yf.Ticker(to_yfinance_symbol(symbol)).history(
+        period=period,
+        interval=interval,
+        timeout=15,
+    )
+
+
 @st.fragment
 def render_divergence_backtest(saved_tickers):
     if not saved_tickers:
         st.info("Add tickers to the saved watchlist before running a backtest.")
         return
-    selected_ticker = st.selectbox(
-        "Backtest ticker",
-        saved_tickers,
-        key="quant_backtest_ticker",
+    batch_mode = st.checkbox(
+        "Run across multiple saved tickers",
+        key="quant_backtest_batch_mode",
     )
+    if batch_mode:
+        selected_tickers = st.multiselect(
+            "Tickers to backtest",
+            saved_tickers,
+            default=saved_tickers,
+            key="quant_backtest_batch_tickers",
+        )
+        if not selected_tickers:
+            st.info("Select at least one saved ticker to run the batch backtest.")
+            return
+        st.caption(
+            "Histories are fetched one ticker at a time and cached for one hour, "
+            "with a 0.3-second pause between ticker requests."
+        )
+    else:
+        selected_tickers = [
+            st.selectbox(
+                "Backtest ticker",
+                saved_tickers,
+                key="quant_backtest_ticker",
+            )
+        ]
+    signal_rule_options = [
+        "MACD histogram turn",
+        "RSI bullish divergence",
+        "MACD bullish divergence",
+        "CPD bullish divergence",
+        "MFI bullish divergence",
+        "Any single-indicator bullish divergence",
+        "4-indicator bullish confluence",
+    ]
+    if st.session_state.get("quant_backtest_rule") not in signal_rule_options:
+        st.session_state.quant_backtest_rule = signal_rule_options[0]
     signal_rule = st.selectbox(
         "Entry signal",
-        [
-            "Signal_Hist_Turn only",
-            "Signal_Hist_Turn + bullish RSI divergence",
-            "Signal_Hist_Turn + bullish CPD divergence",
-            "Signal_Hist_Turn + bullish MFI divergence",
-            "Signal_Hist_Turn + any bullish divergence",
-        ],
+        signal_rule_options,
         key="quant_backtest_rule",
     )
     col_target, col_stop, col_holding = st.columns(3)
@@ -3960,89 +3997,372 @@ def render_divergence_backtest(saved_tickers):
         value=30,
         step=1,
     )
-    histories, fetch_errors = fetch_batch_price_history(
-        (selected_ticker,), period="2y", interval="1d"
+    vix_overlay_enabled = st.checkbox(
+        "Enable VIX Sentiment Overlay (Optional)",
+        value=False,
+        key="quant_backtest_vix_overlay",
     )
+    calm_threshold = -10.0
+    panic_threshold = 15.0
+    if vix_overlay_enabled:
+        threshold_calm, threshold_panic = st.columns(2)
+        calm_threshold = threshold_calm.number_input(
+            "Calm VIX ROC threshold (%)",
+            min_value=-50.0,
+            max_value=0.0,
+            value=-10.0,
+            step=1.0,
+            help="A 5-day VIX ROC at or below this value is classified as Calm.",
+        )
+        panic_threshold = threshold_panic.number_input(
+            "Panic VIX ROC threshold (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=15.0,
+            step=1.0,
+            help="A 5-day VIX ROC at or above this value is classified as Panic.",
+        )
+        st.caption(
+            "All technical entries are retained. Calm targets are scaled by 1.5x; "
+            "Panic keeps the baseline target and tightens the stop to 0.7x. VIX "
+            "regimes are also available as categorical trade groups."
+        )
+
+    histories = {}
+    fetch_errors = []
+    with st.spinner("Loading cached stock and VIX histories..."):
+        vix_history = pd.DataFrame()
+        if vix_overlay_enabled:
+            try:
+                vix_history = fetch_quant_backtest_history("^VIX", "2y", "1d")
+            except Exception as error:
+                fetch_errors.append(f"VIX history: {error}")
+        for ticker_index, ticker in enumerate(selected_tickers):
+            try:
+                histories[ticker] = fetch_quant_backtest_history(
+                    ticker, "2y", "1d"
+                )
+            except Exception as error:
+                fetch_errors.append(f"{ticker}: {error}")
+            if batch_mode and ticker_index < len(selected_tickers) - 1:
+                time.sleep(0.3)
+    vix_roc = pd.Series(dtype=float)
+    if (
+        vix_overlay_enabled
+        and not vix_history.empty
+        and "Close" in vix_history.columns
+    ):
+        vix_close = pd.to_numeric(vix_history["Close"], errors="coerce")
+        vix_roc = vix_close.pct_change(5) * 100.0
+        vix_roc = vix_roc.replace([np.inf, -np.inf], np.nan).dropna()
+    elif vix_overlay_enabled:
+        st.warning("VIX history is unavailable; trades will use baseline TP/SL values.")
+
+    def align_vix_roc(stock_index):
+        if vix_roc.empty:
+            return pd.Series(np.nan, index=stock_index, dtype=float)
+        clean_vix = vix_roc.copy()
+        clean_vix.index = pd.DatetimeIndex(clean_vix.index)
+        if clean_vix.index.tz is not None:
+            clean_vix.index = clean_vix.index.tz_localize(None)
+        clean_vix.index = clean_vix.index.normalize()
+        clean_vix = clean_vix[~clean_vix.index.duplicated(keep="last")].sort_index()
+        stock_dates = pd.DatetimeIndex(stock_index)
+        if stock_dates.tz is not None:
+            stock_dates = stock_dates.tz_localize(None)
+        aligned = clean_vix.reindex(stock_dates.normalize(), method="ffill")
+        aligned.index = stock_index
+        return aligned
+
+    vix_latest_roc = float(vix_roc.iloc[-1]) if not vix_roc.empty else np.nan
+    if pd.isna(vix_latest_roc):
+        latest_vix_regime = "Unavailable"
+    elif vix_latest_roc <= calm_threshold:
+        latest_vix_regime = "Calm"
+    elif vix_latest_roc >= panic_threshold:
+        latest_vix_regime = "Panic"
+    else:
+        latest_vix_regime = "Normal"
+
+    all_trades = []
+    summary_rows = []
+    ticker_results = {}
+    for ticker, history in histories.items():
+        if history is None or history.empty:
+            fetch_errors.append(f"{ticker}: no usable OHLCV history returned")
+            continue
+        data = calculate_synchronized_macd(history.copy().sort_index())
+        signal_mask = pd.Series(False, index=data.index, dtype=bool)
+        signal_values = pd.Series(np.nan, index=data.index, dtype=float)
+        indicator_for_rule = {
+            "RSI bullish divergence": "RSI",
+            "MACD bullish divergence": "MACD",
+            "CPD bullish divergence": "CPD",
+            "MFI bullish divergence": "MFI",
+        }.get(signal_rule)
+
+        if signal_rule == "MACD histogram turn":
+            signal_mask = data["Signal_Hist_Turn"].fillna(False).astype(bool)
+            signal_values.loc[signal_mask] = data.loc[signal_mask, "MACD_Hist"]
+        elif signal_rule in (
+            "Any single-indicator bullish divergence",
+            "4-indicator bullish confluence",
+        ) or indicator_for_rule:
+            if signal_rule == "4-indicator bullish confluence":
+                bullish_events = find_four_indicator_confluences(history)
+                event_values = []
+            else:
+                bullish_events = find_single_indicator_divergences(
+                    history,
+                    lookback_days=90,
+                )
+                bullish_events = [
+                    event for event in bullish_events
+                    if event["Signal Type"] == "Bullish"
+                    and (
+                        indicator_for_rule is None
+                        or event["Indicator"] == indicator_for_rule
+                    )
+                ]
+                event_values = [
+                    event.get("Indicator Value", np.nan)
+                    for event in bullish_events
+                ]
+
+            bar_dates = np.asarray(
+                [pd.Timestamp(value).date() for value in data.index]
+            )
+            for event_index, event in enumerate(bullish_events):
+                if event["Signal Type"] != "Bullish":
+                    continue
+                event_date = pd.Timestamp(event["Trigger Date"]).date()
+                pivot_indexes = np.flatnonzero(bar_dates == event_date)
+                if not pivot_indexes.size:
+                    continue
+                confirmed_index = int(pivot_indexes[-1]) + 3
+                if confirmed_index >= len(data):
+                    continue
+                signal_mask.iloc[confirmed_index] = True
+                if indicator_for_rule is not None:
+                    signal_values.iloc[confirmed_index] = event_values[event_index]
+
+        result = backtest_signal_strategy(
+            data,
+            signal_mask,
+            hold_limit=int(hold_limit),
+            target_return=target_return / 100.0,
+            stop_return=stop_return / 100.0,
+            vix_rate_of_change=(
+                align_vix_roc(data.index) if vix_overlay_enabled else None
+            ),
+            calm_vix_threshold=calm_threshold,
+            panic_vix_threshold=panic_threshold,
+            signal_indicator_values=(
+                signal_values if indicator_for_rule or signal_rule == "MACD histogram turn"
+                else None
+            ),
+            vix_overlay_enabled=vix_overlay_enabled,
+        )
+        ticker_results[ticker] = result
+        trades = result["trades"].copy()
+        if not trades.empty:
+            trades.insert(0, "Ticker", ticker)
+            all_trades.append(trades)
+        metrics = result["metrics"]
+        stock_returns = pd.to_numeric(
+            history["Close"], errors="coerce"
+        ).pct_change()
+        if (
+            vix_overlay_enabled
+            and not vix_history.empty
+            and "Close" in vix_history.columns
+        ):
+            vix_returns = pd.to_numeric(
+                vix_history["Close"], errors="coerce"
+            ).pct_change()
+            stock_returns.index = pd.DatetimeIndex(stock_returns.index)
+            vix_returns.index = pd.DatetimeIndex(vix_returns.index)
+            if stock_returns.index.tz is not None:
+                stock_returns.index = stock_returns.index.tz_localize(None)
+            if vix_returns.index.tz is not None:
+                vix_returns.index = vix_returns.index.tz_localize(None)
+            stock_returns.index = stock_returns.index.normalize()
+            vix_returns.index = vix_returns.index.normalize()
+            correlated = pd.concat(
+                [stock_returns.rename("Stock"), vix_returns.rename("VIX")],
+                axis=1,
+            ).dropna()
+        else:
+            correlated = pd.DataFrame()
+        vix_correlation = (
+            float(correlated["Stock"].corr(correlated["VIX"]))
+            if len(correlated) >= 2
+            else np.nan
+        )
+        summary_row = {
+            "Ticker": ticker,
+            "Total Trades": metrics["trade_count"],
+            "Win Rate (%)": metrics["win_rate"],
+            "Average Return (%)": (
+                float(trades["Return (%)"].mean()) if not trades.empty else np.nan
+            ),
+            "Max Drawdown (%)": metrics["max_drawdown"],
+        }
+        if vix_overlay_enabled:
+            summary_row.update({
+                "VIX Regime": latest_vix_regime,
+                "Stock/VIX Corr": vix_correlation,
+            })
+        summary_rows.append(summary_row)
+
     if fetch_errors:
         st.warning("; ".join(fetch_errors))
-    history = histories.get(selected_ticker)
-    if history is None or history.empty:
-        st.info("No usable historical OHLCV data is available for this ticker.")
-        return
-
-    data = calculate_synchronized_macd(history.copy().sort_index())
-    base_signals = data["Signal_Hist_Turn"].fillna(False).astype(bool)
-    signal_mask = base_signals.copy()
-    if signal_rule != "Signal_Hist_Turn only":
-        indicator_name = (
-            "RSI" if "RSI divergence" in signal_rule else
-            "CPD" if "CPD divergence" in signal_rule else
-            "MFI" if "MFI divergence" in signal_rule else
-            None
-        )
-        bullish = find_single_indicator_divergences(
-            history,
-            lookback_days=365 * 3,
-        )
-        bullish = [
-            item for item in bullish
-            if item["Signal Type"] == "Bullish"
-            and (indicator_name is None or item["Indicator"] == indicator_name)
-        ]
-        confirmed_divergence_indexes = []
-        bar_dates = np.asarray([pd.Timestamp(value).date() for value in data.index])
-        for event in bullish:
-            event_date = pd.Timestamp(event["Trigger Date"]).date()
-            pivots = np.flatnonzero(bar_dates == event_date)
-            if not pivots.size:
-                continue
-            confirmed_index = int(pivots[-1]) + 3
-            if confirmed_index >= len(data):
-                continue
-            turn_indexes = np.flatnonzero(
-                base_signals.iloc[confirmed_index:min(confirmed_index + 4, len(data))]
+    summary = pd.DataFrame(summary_rows)
+    trades_frame = (
+        pd.concat(all_trades, ignore_index=True)
+        if all_trades
+        else pd.DataFrame()
+    )
+    if not summary.empty:
+        if not batch_mode:
+            metrics = ticker_results[selected_tickers[0]]["metrics"]
+            metric_a, metric_b, metric_c, metric_d, metric_e = st.columns(5)
+            metric_a.metric("Trades", metrics["trade_count"])
+            metric_b.metric(
+                "Win rate",
+                f"{metrics['win_rate']:.1f}%"
+                if pd.notna(metrics["win_rate"])
+                else "N/A",
             )
-            if turn_indexes.size:
-                confirmed_divergence_indexes.append(
-                    confirmed_index + int(turn_indexes[0])
-                )
-        signal_mask[:] = False
-        if confirmed_divergence_indexes:
-            signal_mask.iloc[confirmed_divergence_indexes] = True
-
-    result = backtest_signal_strategy(
-        data,
-        signal_mask,
-        hold_limit=int(hold_limit),
-        target_return=target_return / 100.0,
-        stop_return=stop_return / 100.0,
-    )
-    metrics = result["metrics"]
-    metric_a, metric_b, metric_c, metric_d = st.columns(4)
-    metric_a.metric("Trades", metrics["trade_count"])
-    metric_b.metric(
-        "Win rate",
-        f"{metrics['win_rate']:.1f}%" if pd.notna(metrics["win_rate"]) else "N/A",
-    )
-    metric_c.metric(
-        "Average holding",
-        (
-            f"{metrics['average_holding_period']:.1f} bars"
-            if pd.notna(metrics["average_holding_period"])
-            else "N/A"
-        ),
-    )
-    metric_d.metric(
-        "Max drawdown",
-        f"{metrics['max_drawdown']:.1f}%" if pd.notna(metrics["max_drawdown"]) else "N/A",
-    )
-    if not result["trades"].empty:
+            metric_c.metric(
+                "Average return",
+                (
+                    f"{summary.iloc[0]['Average Return (%)']:.2f}%"
+                    if pd.notna(summary.iloc[0]["Average Return (%)"])
+                    else "N/A"
+                ),
+            )
+            metric_d.metric(
+                "Average holding",
+                f"{metrics['average_holding_period']:.1f} bars"
+                if pd.notna(metrics["average_holding_period"])
+                else "N/A",
+            )
+            metric_e.metric(
+                "Max drawdown",
+                f"{metrics['max_drawdown']:.1f}%"
+                if pd.notna(metrics["max_drawdown"])
+                else "N/A",
+            )
+        elif vix_overlay_enabled:
+            st.metric(
+                "Latest 5-day VIX ROC / regime",
+                (
+                    f"{vix_latest_roc:.1f}% / {latest_vix_regime}"
+                    if pd.notna(vix_latest_roc)
+                    else latest_vix_regime
+                ),
+            )
+        summary_formats = {
+            "Win Rate (%)": "{:.2f}%",
+            "Average Return (%)": "{:.2f}%",
+            "Max Drawdown (%)": "{:.2f}%",
+        }
+        if vix_overlay_enabled:
+            summary_formats["Stock/VIX Corr"] = "{:.2f}"
         st.dataframe(
-            result["trades"].style.format({
+            summary.style.format(summary_formats, na_rep="N/A"),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if not trades_frame.empty:
+        regression_columns = ["Holding Period (bars)"]
+        if vix_overlay_enabled and trades_frame["VIX ROC (%)"].notna().any():
+            regression_columns.append("VIX ROC (%)")
+        if trades_frame.get("Entry Signal Value", pd.Series(dtype=float)).notna().any():
+            regression_columns.append("Entry Signal Value")
+        x_column = st.selectbox(
+            "Regression independent variable",
+            regression_columns,
+            key="quant_backtest_regression_x",
+        )
+        regression_data = trades_frame[[x_column, "Return (%)"]].apply(
+            pd.to_numeric, errors="coerce"
+        )
+        regression_data = regression_data.replace(
+            [np.inf, -np.inf], np.nan
+        ).dropna()
+        regression_data["Ticker"] = trades_frame.loc[
+            regression_data.index, "Ticker"
+        ]
+        if vix_overlay_enabled:
+            regression_data["VIX Regime"] = trades_frame.loc[
+                regression_data.index, "VIX Regime"
+            ].fillna("Unavailable")
+        else:
+            regression_data["VIX Regime"] = "Disabled"
+
+        figure = go.Figure()
+        fit_groups = (
+            regression_data.groupby("VIX Regime", sort=False)
+            if vix_overlay_enabled
+            else [("Disabled", regression_data)]
+        )
+        no_fit_groups = []
+        for regime, group in fit_groups:
+            figure.add_trace(go.Scatter(
+                x=group[x_column],
+                y=group["Return (%)"],
+                mode="markers",
+                name=f"{regime} trades",
+                text=group["Ticker"],
+                hovertemplate=(
+                    f"%{{text}}<br>VIX regime: {regime}<br>{x_column}: "
+                    "%{x}<br>Return: %{y:.2f}%<extra></extra>"
+                ),
+            ))
+            regression = fit_trade_return_regression(
+                group[x_column].to_numpy(dtype=float),
+                group["Return (%)"].to_numpy(dtype=float),
+            )
+            if regression is None:
+                no_fit_groups.append(regime)
+                continue
+            figure.add_trace(go.Scatter(
+                x=regression["x"],
+                y=regression["y"],
+                mode="lines",
+                name=(
+                    f"{regime} OLS trend (R²={regression['r_squared']:.2f})"
+                    if np.isfinite(regression["r_squared"])
+                    else f"{regime} OLS trend"
+                ),
+            ))
+        if no_fit_groups:
+            st.caption(
+                "No trendline was fitted for "
+                + ", ".join(no_fit_groups)
+                + "; each regime needs at least 4 valid trades, 3 distinct "
+                "x-values, and variation in returns."
+            )
+        figure.update_layout(
+            title=f"Trade return vs. {x_column.lower()}",
+            xaxis_title=x_column,
+            yaxis_title="Trade Return (%)",
+            height=390,
+            margin=dict(l=20, r=20, t=45, b=20),
+        )
+        st.plotly_chart(figure, use_container_width=True)
+        st.dataframe(
+            trades_frame.style.format({
                 "Entry Price": "${:.2f}",
                 "Exit Price": "${:.2f}",
                 "Return (%)": "{:.2f}%",
-            }),
+                "VIX ROC (%)": "{:.2f}%",
+                "Applied Target (%)": "{:.2f}%",
+                "Applied Stop (%)": "{:.2f}%",
+            }, na_rep="N/A"),
             use_container_width=True,
             hide_index=True,
         )
