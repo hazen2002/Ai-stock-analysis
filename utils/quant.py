@@ -4,47 +4,6 @@ import numpy as np
 import pandas as pd
 
 
-def fit_trade_return_regression(x_values, y_values):
-    """Fit a linear OLS trend only when the sample can support a useful fit."""
-    x = np.asarray(x_values, dtype=float).reshape(-1)
-    y = np.asarray(y_values, dtype=float).reshape(-1)
-    if x.size != y.size:
-        raise ValueError("Regression x and y values must have matching lengths.")
-
-    valid = np.isfinite(x) & np.isfinite(y)
-    x = x[valid]
-    y = y[valid]
-    if (
-        len(x) < 4
-        or np.unique(x).size < 3
-        or np.unique(y).size < 2
-    ):
-        return None
-
-    x_center = float(x.mean())
-    x_scale = float(x.std())
-    total_sum = float(np.sum((y - y.mean()) ** 2))
-    if not np.isfinite(x_scale) or x_scale == 0 or total_sum == 0:
-        return None
-
-    scaled_x = (x - x_center) / x_scale
-    design = np.column_stack((scaled_x, np.ones_like(scaled_x)))
-    coefficients, _, rank, _ = np.linalg.lstsq(design, y, rcond=None)
-    if rank != 2 or not np.isfinite(coefficients).all():
-        return None
-
-    fitted_y = design @ coefficients
-    residual_sum = float(np.sum((y - fitted_y) ** 2))
-    fitted_x = np.linspace(float(x.min()), float(x.max()), 100)
-    fitted_scaled_x = (fitted_x - x_center) / x_scale
-    fitted_line = coefficients[0] * fitted_scaled_x + coefficients[1]
-    return {
-        "x": fitted_x,
-        "y": fitted_line,
-        "r_squared": 1.0 - residual_sum / total_sum,
-    }
-
-
 def rolling_correlation_matrix(price_frames, window=30, min_periods=None):
     """Return the latest rolling correlation matrix for aligned close prices."""
     valid_window = max(2, int(window))
