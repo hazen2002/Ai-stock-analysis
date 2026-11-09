@@ -4,6 +4,47 @@ import numpy as np
 import pandas as pd
 
 
+def fit_trade_return_regression(x_values, y_values):
+    """Fit a linear OLS trend only when the sample can support a useful fit."""
+    x = np.asarray(x_values, dtype=float).reshape(-1)
+    y = np.asarray(y_values, dtype=float).reshape(-1)
+    if x.size != y.size:
+        raise ValueError("Regression x and y values must have matching lengths.")
+
+    valid = np.isfinite(x) & np.isfinite(y)
+    x = x[valid]
+    y = y[valid]
+    if (
+        len(x) < 4
+        or np.unique(x).size < 3
+        or np.unique(y).size < 2
+    ):
+        return None
+
+    x_center = float(x.mean())
+    x_scale = float(x.std())
+    total_sum = float(np.sum((y - y.mean()) ** 2))
+    if not np.isfinite(x_scale) or x_scale == 0 or total_sum == 0:
+        return None
+
+    scaled_x = (x - x_center) / x_scale
+    design = np.column_stack((scaled_x, np.ones_like(scaled_x)))
+    coefficients, _, rank, _ = np.linalg.lstsq(design, y, rcond=None)
+    if rank != 2 or not np.isfinite(coefficients).all():
+        return None
+
+    fitted_y = design @ coefficients
+    residual_sum = float(np.sum((y - fitted_y) ** 2))
+    fitted_x = np.linspace(float(x.min()), float(x.max()), 100)
+    fitted_scaled_x = (fitted_x - x_center) / x_scale
+    fitted_line = coefficients[0] * fitted_scaled_x + coefficients[1]
+    return {
+        "x": fitted_x,
+        "y": fitted_line,
+        "r_squared": 1.0 - residual_sum / total_sum,
+    }
+
+
 def rolling_correlation_matrix(price_frames, window=30, min_periods=None):
     """Return the latest rolling correlation matrix for aligned close prices."""
     valid_window = max(2, int(window))
@@ -57,8 +98,15 @@ def backtest_signal_strategy(
     hold_limit=30,
     target_return=0.15,
     stop_return=0.05,
+    vix_rate_of_change=None,
+    calm_vix_threshold=-10.0,
+    panic_vix_threshold=15.0,
+    calm_target_multiplier=1.5,
+    panic_stop_multiplier=0.7,
+    signal_indicator_values=None,
+    vix_overlay_enabled=True,
 ):
-    """Backtest sequential long signals with conservative stop/target ordering."""
+    """Backtest sequential long signals with optional VIX-adjusted exits."""
     required = {"High", "Low", "Close"}
     if history.empty or not required.issubset(history.columns):
         return {
@@ -73,6 +121,19 @@ def backtest_signal_strategy(
         }
     data = history.sort_index().copy()
     mask = pd.Series(signal_mask, index=data.index).fillna(False).astype(bool)
+    if not vix_overlay_enabled or vix_rate_of_change is None:
+        vix_roc = pd.Series(np.nan, index=data.index, dtype=float)
+    else:
+        vix_roc = pd.to_numeric(
+            pd.Series(vix_rate_of_change).reindex(data.index), errors="coerce"
+        )
+    if signal_indicator_values is None:
+        signal_values = pd.Series(np.nan, index=data.index, dtype=float)
+    else:
+        signal_values = pd.to_numeric(
+            pd.Series(signal_indicator_values).reindex(data.index),
+            errors="coerce",
+        )
     high = pd.to_numeric(data["High"], errors="coerce").to_numpy(dtype=float)
     low = pd.to_numeric(data["Low"], errors="coerce").to_numpy(dtype=float)
     close = pd.to_numeric(data["Close"], errors="coerce").to_numpy(dtype=float)
@@ -87,8 +148,31 @@ def backtest_signal_strategy(
         entry_price = close[entry_index]
         if not np.isfinite(entry_price) or entry_price <= 0:
             continue
-        target_price = entry_price * (1.0 + max(float(target_return), 0.0))
-        stop_price = entry_price * (1.0 - max(float(stop_return), 0.0))
+        entry_vix_roc = vix_roc.iloc[entry_index]
+        if not vix_overlay_enabled:
+            vix_regime = "Disabled"
+            target_multiplier = 1.0
+            stop_multiplier = 1.0
+        elif pd.isna(entry_vix_roc):
+            vix_regime = "Unavailable"
+            target_multiplier = 1.0
+            stop_multiplier = 1.0
+        elif entry_vix_roc <= calm_vix_threshold:
+            vix_regime = "Calm"
+            target_multiplier = max(float(calm_target_multiplier), 0.0)
+            stop_multiplier = 1.0
+        elif entry_vix_roc >= panic_vix_threshold:
+            vix_regime = "Panic"
+            target_multiplier = 1.0
+            stop_multiplier = max(float(panic_stop_multiplier), 0.0)
+        else:
+            vix_regime = "Normal"
+            target_multiplier = 1.0
+            stop_multiplier = 1.0
+        applied_target = max(float(target_return), 0.0) * target_multiplier
+        applied_stop = max(float(stop_return), 0.0) * stop_multiplier
+        target_price = entry_price * (1.0 + applied_target)
+        stop_price = entry_price * (1.0 - applied_stop)
         final_index = min(len(data) - 1, entry_index + max(1, int(hold_limit)))
         exit_index = final_index
         exit_price = close[final_index]
@@ -120,6 +204,13 @@ def backtest_signal_strategy(
             "Holding Period (bars)": holding_period,
             "Return (%)": trade_return * 100.0,
             "Exit Reason": exit_reason,
+            "VIX ROC (%)": entry_vix_roc,
+            "VIX Regime": vix_regime,
+            "VIX Calm": vix_regime == "Calm",
+            "VIX Panic": vix_regime == "Panic",
+            "Applied Target (%)": applied_target * 100.0,
+            "Applied Stop (%)": applied_stop * 100.0,
+            "Entry Signal Value": signal_values.iloc[signal_index],
         })
         next_available_index = exit_index + 1
 
